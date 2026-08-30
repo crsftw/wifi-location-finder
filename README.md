@@ -17,7 +17,7 @@ between four modes; hit **ENTER** on a target and you drop into a shared RSSI
 
 | Mode (`S` to switch) | What it lists | ENTER hunts |
 |---|---|---|
-| **NETWORKS** | every AP heard, hidden ones as `<hidden>` (SSID, BSSID, ch, **GHz**, RSSI, enc, **VENDOR**, **DEVICE**). `SPACE` multi-selects (e.g. all BSSIDs of one router) | that AP's transmitter |
+| **NETWORKS** | APs heard, hidden ones as `<hidden>` (SSID, BSSID, ch, **GHz**, RSSI, enc, **VENDOR**, **DEVICE**). Collapsed into **one row per physical device** by default (the 8 BSSIDs of one radio become a single `Guest +7` row); press **`g`** to expand to per-SSID. `SPACE` multi-selects a device (or a BSSID in flat view) | that device's transmitter(s) |
 | **DEAUTH FLOODS** | channels under a deauth flood, ranked by deauths/sec, `⚑` = flood, with **VENDOR**/**DEVICE** for each source. A `ALL deauths on ch N` row per channel handles spoofed/randomised sources | the attacker's transmitter (or every deauth on that channel) |
 | **PROBE CLIENTS** | client devices heard probing (phones, laptops, IoT), ranked by RSSI, with **VENDOR**, a **PHY** capability class, and the **PROBES** column — the named networks each client is searching for (its saved-network list, which ties a device to its home/work SSIDs) | that client's transmitter |
 | **TRACK MAC** | a text box — type a MAC | that MAC, **auto-located** by hopping until it's heard, then parked on its channel |
@@ -114,8 +114,9 @@ on a target. `init-hunt.sh` still does the one-time monitor-mode setup.
 | Where | Key | Action |
 |---|---|---|
 | Scan screen | `S` | switch mode: NETWORKS → DEAUTH FLOODS → PROBE CLIENTS → TRACK MAC |
+| | `g` | (NETWORKS) toggle device view (one row per radio) ↔ per-SSID |
 | | ↑ / ↓ | move the cursor |
-| | `SPACE` | (NETWORKS) select / deselect |
+| | `SPACE` | (NETWORKS) select / deselect the device (or BSSID in per-SSID view) |
 | | `ENTER` | hunt the selected/typed target |
 | | `ESC` | cancel a MAC auto-locate |
 | | `q` | quit |
