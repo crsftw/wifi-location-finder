@@ -43,6 +43,7 @@ from router_hunt import (CaptureThread, Hopper, hunt, build_target_filter,
                          valid_mac, freq_to_chan_map, decode_ssid, norm_priv,
                          ssid_display, first_int, directional_reminder,
                          parse_hunt, HUNT_FIELDS, BEACON, PROBE_RESP, Beeper)
+import device_id
 
 DEAUTH = 12
 
@@ -52,10 +53,15 @@ COMBINED_FILTER = (f"wlan.fc.type_subtype=={BEACON} || "
                    f"wlan.fc.type_subtype=={PROBE_RESP} || "
                    f"wlan.fc.type_subtype=={DEAUTH}")
 # SSID is last: it may itself contain the '|' separator, so we rejoin the tail.
+# The three WPS identity fields (cleartext device name/model/manufacturer from
+# WPS-enabled beacons and probe-responses) sit just before it at fixed indices;
+# they are controlled device strings and in practice never contain a '|'.
 COMBINED_FIELDS = ["wlan.fc.type_subtype", "wlan.sa", "wlan.ta", "wlan.da",
                    "wlan.bssid", "radiotap.channel.freq",
                    "radiotap.dbm_antsignal", "wlan.fixed.capabilities.privacy",
+                   "wps.device_name", "wps.model_name", "wps.manufacturer",
                    "wlan.ssid"]
+_N_FIXED = 11  # fields before the (possibly '|'-containing) SSID tail
 
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 
@@ -67,21 +73,30 @@ def fmt_ghz(freq):
     return f"{freq / 1000:.1f}GHz"
 
 
+def _first(v):
+    """First comma-joined occurrence of a tshark field, trimmed."""
+    return v.split(",")[0].strip()
+
+
 def parse_combined(line):
     parts = line.split("|")
     if len(parts) < len(COMBINED_FIELDS):
         return None
-    st, sa, ta, da, bssid, freq, sig, priv = parts[:8]
-    ssid = decode_ssid("|".join(parts[8:]))
+    (st, sa, ta, da, bssid, freq, sig, priv,
+     wps_name, wps_model, wps_manuf) = parts[:_N_FIXED]
+    ssid = decode_ssid("|".join(parts[_N_FIXED:]))
     return {
         "st": first_int(st),
-        "sa": sa.split(",")[0].strip().lower(),
-        "ta": ta.split(",")[0].strip().lower(),
-        "da": da.split(",")[0].strip().lower(),
-        "bssid": bssid.split(",")[0].strip().lower(),
+        "sa": _first(sa).lower(),
+        "ta": _first(ta).lower(),
+        "da": _first(da).lower(),
+        "bssid": _first(bssid).lower(),
         "freq": first_int(freq),
         "rssi": first_int(sig),
         "priv": norm_priv(priv),
+        "wps_name": _first(wps_name),
+        "wps_model": _first(wps_model),
+        "wps_manuf": _first(wps_manuf),
         "ssid": ssid,
     }
 
@@ -125,7 +140,9 @@ class Aggregator:
                 "bssid": b, "ssid": rec["ssid"], "hidden": hidden,
                 "freq": rec["freq"],
                 "rssi": rec["rssi"] if rec["rssi"] is not None else -99,
-                "priv": rec["priv"], "count": 1}
+                "priv": rec["priv"],
+                "wps_name": rec["wps_name"], "wps_model": rec["wps_model"],
+                "wps_manuf": rec["wps_manuf"], "count": 1}
         else:
             if rec["ssid"]:
                 n["ssid"] = rec["ssid"]
@@ -137,6 +154,10 @@ class Aggregator:
             if rec["rssi"] is not None:
                 n["rssi"] = rec["rssi"]
             n["priv"] = rec["priv"] or n["priv"]
+            # WPS strings are stable per device - keep the first non-empty seen
+            for k in ("wps_name", "wps_model", "wps_manuf"):
+                if rec[k] and not n.get(k):
+                    n[k] = rec[k]
             n["count"] += 1
 
     @staticmethod
@@ -175,24 +196,61 @@ class Aggregator:
         return rows
 
 
+# ==========================================================================
+# Passive device identity (feature slice 1+2+3): vendor + device guess, shown
+# as two columns in the lists and folded into the hunt header.
+# ==========================================================================
+
+def vendor_cell(mac, oui):
+    """VENDOR column: 'rnd' for a randomized MAC, the OUI vendor, or '·'."""
+    if device_id.is_randomized(mac):
+        return "rnd"
+    return device_id.short_vendor(device_id.vendor_for(mac, oui)) or "·"
+
+
+def device_cell(mac, oui, net=None, role=""):
+    """DEVICE column: WPS model/name > device-maker OUI > role > rnd, or '·'."""
+    net = net or {}
+    return device_id.device_guess(
+        mac, oui, net.get("wps_name", ""), net.get("wps_model", ""),
+        net.get("wps_manuf", ""), role) or "·"
+
+
+def identity_str(mac, oui, net=None, role=""):
+    """One-line 'Vendor · guess' identity for the hunt header (or '')."""
+    vend = "rnd-MAC" if device_id.is_randomized(mac) else \
+        device_id.short_vendor(device_id.vendor_for(mac, oui))
+    guess = device_cell(mac, oui, net, role)
+    if guess == "·":
+        guess = ""
+    seen, out = set(), []
+    for p in (vend, guess):
+        if p and p not in seen:
+            out.append(p)
+            seen.add(p)
+    return " · ".join(out)
+
+
 def resolve_target(t, f2c):
     """Map a selection-screen target dict to (display_filter, label, freq, chan)."""
     freq = t["freq"]
     chan = f2c.get(freq, 0)
     band = fmt_ghz(freq)
+    ident = t.get("ident", "")
+    who = f" [{ident}]" if ident else ""
     tail = f"(ch{chan} · {band})"
     if t["kind"] == "net":
         dfilter, lbl = build_target_filter(bssids=t["bssids"])
-        label = f"{lbl}  {tail}"
+        label = f"{lbl}{who}  {tail}"
     elif t["kind"] == "flood_src":
         dfilter, _ = build_target_filter(sa=t["src"])
-        label = f"deauth src {t['src']}  {tail}"
+        label = f"deauth src {t['src']}{who}  {tail}"
     elif t["kind"] == "flood_all":
         dfilter = f"wlan.fc.type_subtype=={DEAUTH}"
         label = f"ALL deauths  {tail}"
     elif t["kind"] == "mac":
         dfilter, _ = build_target_filter(sa=t["mac"])
-        label = f"MAC {t['mac']}  {tail}"
+        label = f"MAC {t['mac']}{who}  {tail}"
     else:
         raise ValueError(f"unknown target kind {t['kind']!r}")
     return dfilter, label, freq, chan
@@ -207,7 +265,7 @@ MODE_NAMES = ["NETWORKS", "DEAUTH FLOODS", "TRACK MAC"]
 MAC_CHARS = set("0123456789abcdefABCDEF:")
 
 
-def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
+def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
     """Returns a target dict (see resolve_target) or None if the user quit."""
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -232,7 +290,8 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
 
         # auto-locate: as soon as the typed MAC is heard, hunt it
         if locating and locating in agg.seen_ch:
-            return {"kind": "mac", "mac": locating, "freq": agg.seen_ch[locating]}
+            return {"kind": "mac", "mac": locating, "freq": agg.seen_ch[locating],
+                    "ident": identity_str(locating, oui)}
 
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -257,15 +316,18 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
             cur_net = max(0, min(cur_net, len(rows) - 1)) if rows else 0
             stdscr.addnstr(3, 0, "UP/DOWN move  SPACE select  ENTER hunt  "
                            f"({len(selected)} selected)", w - 1, curses.A_DIM)
-            hdr = (f"  {'SSID':<20} {'BSSID':<18} {'ch':>3} {'GHz':>6} "
-                   f"{'RSSI':>5} {'enc':>4} {'seen':>5}")
+            hdr = (f"  {'SSID':<16} {'BSSID':<17} {'ch':>3} {'GHz':>6} "
+                   f"{'RSSI':>5} {'enc':>4} {'VENDOR':<12} {'DEVICE':<12} "
+                   f"{'seen':>5}")
             stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
             _draw_list(stdscr, 5, h - 6, rows, cur_net,
                        lambda r: (f"[{'x' if r['bssid'] in selected else ' '}] "
-                                  f"{ssid_display(r):<20.20} {r['bssid']:<18} "
+                                  f"{ssid_display(r):<16.16} {r['bssid']:<17} "
                                   f"{f2c.get(r['freq'],'?'):>3} {fmt_ghz(r['freq']):>6} "
                                   f"{r['rssi']:>5} "
                                   f"{'wpa' if r['priv']=='1' else 'open':>4} "
+                                  f"{vendor_cell(r['bssid'], oui):<12.12} "
+                                  f"{device_cell(r['bssid'], oui, r, role='ap'):<12.12} "
                                   f"{r['count']:>5}"),
                        dim=lambda r: r["hidden"], w=w)
 
@@ -275,19 +337,23 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
             stdscr.addnstr(3, 0, "UP/DOWN move  ENTER hunt  "
                            "(⚑ = flood; 'all' row tracks every deauth on that ch)",
                            w - 1, curses.A_DIM)
-            hdr = (f"    {'GHz':>6} {'ch':>3}  {'source':<18} {'d/s':>6} {'RSSI':>5}")
+            hdr = (f"    {'GHz':>6} {'ch':>3}  {'source':<17} "
+                   f"{'VENDOR':<12} {'DEVICE':<12} {'d/s':>6} {'RSSI':>5}")
             stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
 
             def flood_line(r):
                 flag = "⚑" if r["flood"] else " "
                 if r["kind"] == "all":
-                    who = "ALL deauths on ch"
+                    who, vend, dev = "ALL deauths on ch", "", ""
                     rssi = "   -"
                 else:
                     who = r["src"]
+                    vend = vendor_cell(r["src"], oui)
+                    dev = device_cell(r["src"], oui, role="attacker")
                     rssi = f"{r['rssi']:>5}" if r["rssi"] is not None else "   -"
                 return (f"{flag} {fmt_ghz(r['freq']):>6} {f2c.get(r['freq'],'?'):>3}  "
-                        f"{who:<18.18} {r['rate']:>6.1f} {rssi:>5}")
+                        f"{who:<17.17} {vend:<12.12} {dev:<12.12} "
+                        f"{r['rate']:>6.1f} {rssi:>5}")
             _draw_list(stdscr, 5, h - 6, rows, cur_flood, flood_line,
                        dim=lambda r: not r["flood"], w=w)
 
@@ -330,7 +396,8 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
                 if not valid_mac(m):
                     mac_error = f"not a valid MAC: {mac_input!r}"
                 elif m in agg.seen_ch:
-                    return {"kind": "mac", "mac": m, "freq": agg.seen_ch[m]}
+                    return {"kind": "mac", "mac": m, "freq": agg.seen_ch[m],
+                            "ident": identity_str(m, oui)}
                 else:
                     locating = m
                     mac_error = ""
@@ -369,9 +436,12 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
                 targets = selected or {rows[cur_net]["bssid"]}
                 chosen = [r for r in rows if r["bssid"] in targets]
                 chosen.sort(key=lambda r: r["rssi"], reverse=True)
+                strongest = chosen[0]
                 return {"kind": "net",
                         "bssids": {r["bssid"] for r in chosen},
-                        "freq": chosen[0]["freq"]}
+                        "freq": strongest["freq"],
+                        "ident": identity_str(strongest["bssid"], oui,
+                                              strongest, role="ap")}
             elif mode == MODE_FLOOD:
                 rows = agg.flood_rows(now, args.rate)
                 if not rows:
@@ -379,7 +449,8 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
                 r = rows[cur_flood]
                 if r["kind"] == "all":
                     return {"kind": "flood_all", "freq": r["freq"]}
-                return {"kind": "flood_src", "src": r["src"], "freq": r["freq"]}
+                return {"kind": "flood_src", "src": r["src"], "freq": r["freq"],
+                        "ident": identity_str(r["src"], oui, role="attacker")}
 
 
 def _draw_list(stdscr, top, maxrows, rows, cursor, line_fn, dim, w):
@@ -463,6 +534,12 @@ def main():
     f2c = freq_to_chan_map(chans)
     txguard = TxGuard(iface)
 
+    # One-time OUI load for vendor/device identification (empty map if absent).
+    oui = device_id.load_oui()
+    if not oui:
+        print("! no IEEE OUI database found (install 'ieee-data' for vendor "
+              "names); VENDOR/DEVICE columns will be sparse.", file=sys.stderr)
+
     # Top-level loop: scan+select, hunt, return to scan.
     while True:
         cap = CaptureThread(iface, COMBINED_FILTER, COMBINED_FIELDS, parse_combined)
@@ -470,7 +547,7 @@ def main():
         cap.start()
         hopper.start()
         try:
-            target = curses.wrapper(select_screen, iface, cap, hopper, f2c, txguard, args)
+            target = curses.wrapper(select_screen, iface, cap, hopper, f2c, txguard, oui, args)
         finally:
             hopper.stop()
             cap.stop()
