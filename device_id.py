@@ -74,6 +74,12 @@ _DEVICE_HINTS = (
     ("hak5", "Hak5"),
 )
 
+# Pwnagotchi advertises its presence with beacon frames whose BSSID is this
+# constant (the `SignatureAddress` in pwnagotchi's mesh/wifi.py; also what
+# Kismet's pwnagotchi plugin keys on). It is stable across versions - if a
+# future release changes it, update this one line.
+PWNAGOTCHI_BSSID = "de:ad:be:ef:de:ad"
+
 
 def load_oui(paths=None):
     """Parse the IEEE OUI database into {"AABBCC": "Vendor Name"}.
@@ -230,3 +236,26 @@ def device_guess(mac, oui, wps_name="", wps_model="", wps_manuf="", frame_role="
     if manuf:
         return short_vendor(manuf)
     return ""
+
+
+def deauther_badge(mac, oui, is_flood, is_pwn_beacon=False):
+    """A threat badge for a transmitter, or '' if it looks benign.
+
+    Feature slice 4 - all from solid, verifiable signals, no payload guessing:
+      * a de:ad:be:ef:de:ad advertisement beacon is a pwnagotchi announcing
+        itself -> '⚠ pwnagotchi' (definitive, no question mark);
+      * a deauth-*flood* source is an attacker regardless of hardware, labelled
+        by its OUI: Raspberry Pi -> '⚠ pwnagotchi?', Espressif -> '⚠ ESP
+        deauther?', anything else -> '⚠ deauther?' (the '?' marks strong-but-
+        not-certain evidence).
+    """
+    if is_pwn_beacon:
+        return "⚠ pwnagotchi"
+    if not is_flood:
+        return ""
+    vendor = vendor_for(mac, oui).lower()
+    if "raspberry pi" in vendor:
+        return "⚠ pwnagotchi?"
+    if "espressif" in vendor:
+        return "⚠ ESP deauther?"
+    return "⚠ deauther?"

@@ -43,6 +43,25 @@ advertising WPS as `TP-Link` / `Archer C7` at a glance. All of this is passive
 metadata already in the frames — still **receive-only**, no probing. If the OUI
 database isn't installed, the columns stay sparse (install the `ieee-data` package).
 
+#### Pwnagotchi / deauther badges
+
+The DEVICE column also surfaces a **threat badge** when a transmitter looks like
+an attack device, from solid signals only (no fragile payload guessing):
+
+| Badge | Meaning | Signal |
+|---|---|---|
+| `⚠ pwnagotchi` | a pwnagotchi is present, announcing itself | a beacon whose BSSID is `de:ad:be:ef:de:ad` — pwnagotchi's advertisement signature (definitive, no `?`) |
+| `⚠ pwnagotchi?` | likely a pwnagotchi / Pi-based deauther | a **deauth flood** whose source has a **Raspberry Pi** OUI |
+| `⚠ ESP deauther?` | likely an ESP8266/ESP32 "Deauther" board | a deauth flood whose source has an **Espressif** OUI |
+| `⚠ deauther?` | some device is flooding deauths | a deauth flood from any other (or spoofed) source |
+
+The `?` marks strong-but-not-certain evidence; the bare `de:ad:be:ef:de:ad`
+beacon is certain. The badge follows a target into the hunt header
+(`deauth src b8:27:eb:… [Raspberry Pi · ⚠ pwnagotchi?]`). Note that a pwnagotchi
+randomises the *transmitter* of its advertisement beacons, so those aren't
+reliably huntable — the huntable target is its deauth-flooding radio (the
+Raspberry-Pi-OUI source), which the badge points you straight at.
+
 Direction finding tracks the **transmitter only** (`wlan.sa` / `wlan.ta`), never
 the destination: RSSI is the strength of whoever *sent* the frame, so a frame
 *to* your target carries some other radio's signal and would point the wrong way.

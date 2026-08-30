@@ -129,3 +129,45 @@ def test_device_guess_randomized_marked(tmp_path):
 def test_device_guess_empty_when_nothing_known(tmp_path):
     oui = make_oui(tmp_path)
     assert d.device_guess("1c:2a:3b:00:11:22", oui) == ""
+
+
+# ---- feature 4: pwnagotchi / deauther badge ----
+
+def test_pwnagotchi_bssid_constant():
+    # the public advertisement signature address (pwnagotchi mesh/wifi.py)
+    assert d.PWNAGOTCHI_BSSID == "de:ad:be:ef:de:ad"
+
+
+def test_badge_pwnagotchi_beacon_is_definitive(tmp_path):
+    oui = make_oui(tmp_path)
+    # a de:ad:be:ef:de:ad beacon: it is announcing itself -> no question mark
+    assert d.deauther_badge("de:ad:be:ef:de:ad", oui, is_flood=False,
+                            is_pwn_beacon=True) == "⚠ pwnagotchi"
+    # even without flood context, the beacon flag wins
+    assert d.deauther_badge("b8:27:eb:00:11:22", oui, is_flood=False,
+                            is_pwn_beacon=True) == "⚠ pwnagotchi"
+
+
+def test_badge_raspberry_pi_flood(tmp_path):
+    oui = make_oui(tmp_path)
+    assert d.deauther_badge("b8:27:eb:00:11:22", oui, is_flood=True) == "⚠ pwnagotchi?"
+    assert d.deauther_badge("d8:3a:dd:00:11:22", oui, is_flood=True) == "⚠ pwnagotchi?"
+
+
+def test_badge_espressif_flood(tmp_path):
+    oui = make_oui(tmp_path)
+    assert d.deauther_badge("10:06:1c:00:11:22", oui, is_flood=True) == "⚠ ESP deauther?"
+
+
+def test_badge_unknown_hardware_flood(tmp_path):
+    oui = make_oui(tmp_path)
+    # a sustained flood is an attack regardless of vendor
+    assert d.deauther_badge("1c:2a:3b:00:11:22", oui, is_flood=True) == "⚠ deauther?"
+    # the origin-case spoofed source (no resolvable vendor) still badges
+    assert d.deauther_badge("fe:ff:ff:ff:ff:ff", oui, is_flood=True) == "⚠ deauther?"
+
+
+def test_badge_empty_when_no_flood_and_no_beacon(tmp_path):
+    oui = make_oui(tmp_path)
+    assert d.deauther_badge("b8:27:eb:00:11:22", oui, is_flood=False) == ""
+    assert d.deauther_badge("1c:2a:3b:00:11:22", oui, is_flood=False) == ""
