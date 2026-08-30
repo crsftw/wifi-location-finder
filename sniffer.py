@@ -132,10 +132,13 @@ class Aggregator:
         self.deauth_rssi = {}     # (freq, src) -> last rssi
         self.seen_ch = {}         # mac -> freq last transmitted on
         self.clients = {}         # client mac -> record (probe-request view)
+        self.freq_ts = {}         # freq -> deque[ts]  (all frames, for adaptive hopping)
 
     def add(self, rec, now=None):
         now = time.time() if now is None else now
         freq = rec["freq"]
+        if freq:
+            self.freq_ts.setdefault(freq, deque()).append(now)
         # remember where each transmitter was last heard (for MAC auto-locate)
         for who in (rec["sa"], rec["ta"]):
             if who and who != BROADCAST and freq:
@@ -221,6 +224,19 @@ class Aggregator:
 
     def client_rows(self):
         return sorted(self.clients.values(), key=lambda r: r["rssi"], reverse=True)
+
+    def channel_activity(self, now=None, window=6.0):
+        """Snapshot of recent frame counts per frequency, for adaptive hopping.
+
+        Returns {freq: count} over the trailing `window` seconds. Called on the
+        capture-draining thread; hands the Hopper a fresh plain dict."""
+        now = time.time() if now is None else now
+        out = {}
+        for freq, dq in self.freq_ts.items():
+            self._trim(dq, now, window)
+            if dq:
+                out[freq] = len(dq)
+        return out
 
     def device_rows(self):
         """Networks collapsed into physical devices: BSSIDs sharing the first
@@ -395,6 +411,9 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
             except Exception:
                 break
 
+        # feed the hopper the latest per-channel activity for adaptive weighting
+        hopper.set_activity(agg.channel_activity(now))
+
         # auto-locate: as soon as the typed MAC is heard, hunt it
         if locating and locating in agg.seen_ch:
             return {"kind": "mac", "mac": locating, "freq": agg.seen_ch[locating],
@@ -404,8 +423,9 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
         h, w = stdscr.getmaxyx()
         cur = hopper.current
         curlbl = f"ch{cur[0]} {fmt_ghz(cur[1])}" if cur else "-"
+        hopmode = "adaptive" if hopper.adaptive else "uniform"
         stdscr.addnstr(0, 0, f"SNIFFER · mode: {MODE_NAMES[mode]}   "
-                       f"hopping {curlbl}   [S] switch mode  [q] quit",
+                       f"hopping {curlbl} ({hopmode})   [S] switch mode  [q] quit",
                        w - 1, curses.A_BOLD)
 
         # progress bar (gradient) for the channel sweep
@@ -669,7 +689,15 @@ def main():
     p.add_argument("--iface", help="monitor-mode interface (auto-detects mt7921u)")
     p.add_argument("--band", choices=["2.4", "5", "both"], default="both",
                    help="bands to hop while scanning")
-    p.add_argument("--dwell", type=float, default=1.2, help="seconds per channel while scanning")
+    p.add_argument("--dwell", type=float, default=1.2,
+                   help="base seconds per channel while scanning")
+    p.add_argument("--adaptive", action=argparse.BooleanOptionalAction, default=True,
+                   help="weight dwell toward active channels (--no-adaptive for "
+                        "uniform hopping)")
+    p.add_argument("--min-dwell", type=float, default=0.3,
+                   help="shortest dwell for a silent channel (adaptive)")
+    p.add_argument("--max-dwell", type=float, default=3.0,
+                   help="longest dwell for a flooded channel (adaptive)")
     p.add_argument("--rate", type=float, default=2.0,
                    help="deauths/sec above which a channel is flagged as a flood")
     p.add_argument("--flood-window", type=float, default=5.0,
@@ -729,7 +757,8 @@ def main():
     # Top-level loop: scan+select, hunt, return to scan.
     while True:
         cap = CaptureThread(iface, COMBINED_FILTER, COMBINED_FIELDS, parse_combined)
-        hopper = Hopper(iface, chans, args.dwell)
+        hopper = Hopper(iface, chans, args.dwell, adaptive=args.adaptive,
+                        min_dwell=args.min_dwell, max_dwell=args.max_dwell)
         cap.start()
         hopper.start()
         try:

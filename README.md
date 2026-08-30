@@ -25,6 +25,15 @@ between four modes; hit **ENTER** on a target and you drop into a shared RSSI
 Every list has a **GHz** column showing whether the target transmits on **2.x**
 or **5.x GHz**.
 
+The scanner uses **adaptive channel hopping** by default (the header shows
+`(adaptive)`): it still visits every channel each sweep, but weights the dwell
+toward activity — a flooded channel gets the most time, an active one the base
+dwell (`--dwell`), a silent one the minimum (`--min-dwell`), and 2.4 GHz
+primaries (1/6/11) stay warm even when quiet. That collapses the many empty
+5 GHz channels and concentrates listening where the devices are, so a typical
+sweep finishes in about half the time and the RSSI stream on a busy channel is
+much denser. Pass **`--no-adaptive`** for plain uniform hopping.
+
 ### Device identification (VENDOR / DEVICE columns)
 
 The scan lists carry these passive-identity columns, and the identity follows you into
@@ -202,9 +211,10 @@ retunes the receiver with `iw`; retuning is not transmitting.
 
 | File | Purpose |
 |---|---|
-| `sniffer.py` | **All-in-one DF:** networks / deauth floods / a specific MAC → shared RSSI hunt with sounds, gradient bars, GHz column |
+| `sniffer.py` | **All-in-one DF:** networks (collapsed to one row per device) / deauth floods / probe clients / a specific MAC → shared RSSI hunt. Vendor + device + pwnagotchi/deauther badges + PHY class, and adaptive channel hopping |
+| `device_id.py` | Passive device identification: OUI→vendor, randomized-MAC flag, WPS/role device guess, pwnagotchi/deauther badge, PHY-capability fingerprint (standalone, unit-tested) |
 | `deauth_sweep.py` | Sweep every 2.4/5 GHz channel and report **which channel** a deauth flood is on, so you know where to hunt |
-| `router_hunt.py` | Discover networks and direction-find one (the discovery + hunt engine `sniffer.py` builds on; usable standalone) |
+| `router_hunt.py` | Discover networks and direction-find one (the discovery + hunt engine `sniffer.py` builds on; usable standalone). Also holds the adaptive-hopping scheduler |
 | `deauth_hunt.py` | Single-channel RSSI meter with **waypoint recorder, SQLite log, and web dashboard** — for logged, methodical building sweeps once you know the channel |
 | `init-hunt.sh` | Card setup: regdomain, monitor mode, channel, chain constraint, capture verification |
 | `hunt.db` | SQLite: every sample plus your marked waypoints (written by `deauth_hunt.py`) |
@@ -214,8 +224,9 @@ retunes the receiver with `iw`; retuning is not transmitting.
 `sniffer.py` imports the capture, hopping, hunt, audio and colour code from
 `router_hunt.py` / `deauth_hunt.py` / `deauth_sweep.py`, and the vendor/device
 identification from `device_id.py`, so those five `.py` files must stay together
-in this folder. (`device_id.py` is standalone and unit-tested in
-`test_device_id.py` — run `pytest`.)
+in this folder. The pure logic (identification, threat/PHY classification,
+multi-BSSID collapse, adaptive-hop scheduling) is unit-tested — run **`pytest`**
+(`test_device_id.py`, `test_sniffer.py`, `test_hopper.py`).
 
 ### Which tool when
 
