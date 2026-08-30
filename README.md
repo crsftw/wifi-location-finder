@@ -12,13 +12,14 @@ associates or scans (see [Receive-only, and provably so](#receive-only-and-prova
 ## `sniffer.py` — the all-in-one tool
 
 Start it and you get a channel-hopping **scan screen**. Press **`S`** to cycle
-between three modes; hit **ENTER** on a target and you drop into a shared RSSI
+between four modes; hit **ENTER** on a target and you drop into a shared RSSI
 **hunt screen** to direction-find it.
 
 | Mode (`S` to switch) | What it lists | ENTER hunts |
 |---|---|---|
 | **NETWORKS** | every AP heard, hidden ones as `<hidden>` (SSID, BSSID, ch, **GHz**, RSSI, enc, **VENDOR**, **DEVICE**). `SPACE` multi-selects (e.g. all BSSIDs of one router) | that AP's transmitter |
 | **DEAUTH FLOODS** | channels under a deauth flood, ranked by deauths/sec, `⚑` = flood, with **VENDOR**/**DEVICE** for each source. A `ALL deauths on ch N` row per channel handles spoofed/randomised sources | the attacker's transmitter (or every deauth on that channel) |
+| **PROBE CLIENTS** | client devices heard probing (phones, laptops, IoT), ranked by RSSI, with **VENDOR** and the **PROBES** column — the named networks each client is searching for (its saved-network list, which ties a device to its home/work SSIDs) | that client's transmitter |
 | **TRACK MAC** | a text box — type a MAC | that MAC, **auto-located** by hopping until it's heard, then parked on its channel |
 
 Every list has a **GHz** column showing whether the target transmits on **2.x**
@@ -26,7 +27,7 @@ or **5.x GHz**.
 
 ### Device identification (VENDOR / DEVICE columns)
 
-Both lists carry two passive-identity columns, and the identity follows you into
+The scan lists carry these passive-identity columns, and the identity follows you into
 the hunt header (`deauth src fe:ff:ff:ff:ff:ff [attacker]`):
 
 - **VENDOR** — the transmitter's manufacturer, resolved from its MAC's OUI against
@@ -66,7 +67,7 @@ Direction finding tracks the **transmitter only** (`wlan.sa` / `wlan.ta`), never
 the destination: RSSI is the strength of whoever *sent* the frame, so a frame
 *to* your target carries some other radio's signal and would point the wrong way.
 
-### The hunt screen (shared by all three modes)
+### The hunt screen (shared by all four modes)
 
 - **Big dBm readout**, rolling average, **peak-hold**, and a live sparkline.
 - **Gradient bars** — a red → orange → yellow → green ramp (weak → strong).
@@ -95,7 +96,7 @@ on a target. `init-hunt.sh` still does the one-time monitor-mode setup.
 
 | Where | Key | Action |
 |---|---|---|
-| Scan screen | `S` | switch mode: NETWORKS → DEAUTH FLOODS → TRACK MAC |
+| Scan screen | `S` | switch mode: NETWORKS → DEAUTH FLOODS → PROBE CLIENTS → TRACK MAC |
 | | ↑ / ↓ | move the cursor |
 | | `SPACE` | (NETWORKS) select / deselect |
 | | `ENTER` | hunt the selected/typed target |
