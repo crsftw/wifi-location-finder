@@ -171,3 +171,39 @@ def test_badge_empty_when_no_flood_and_no_beacon(tmp_path):
     oui = make_oui(tmp_path)
     assert d.deauther_badge("b8:27:eb:00:11:22", oui, is_flood=False) == ""
     assert d.deauther_badge("1c:2a:3b:00:11:22", oui, is_flood=False) == ""
+
+
+# ---- feature 6: PHY capability fingerprint ----
+
+def test_spatial_streams_from_ht_mcs_bitmask():
+    assert d.spatial_streams(0, 0) == 1          # only MCS 0-7 -> single stream
+    assert d.spatial_streams(0xff, 0) == 2       # MCS 8-15 present -> 2 streams
+    assert d.spatial_streams(0xff, 0xff) == 3    # MCS 16-23 present -> 3+ streams
+    assert d.spatial_streams(0, 0xff) == 3
+
+
+def test_spatial_streams_handles_missing():
+    assert d.spatial_streams(None, None) == 1
+    assert d.spatial_streams("", "") == 1
+
+
+def test_phy_fingerprint_generations():
+    assert d.phy_fingerprint(2437, has_ht=True, has_vht=False, has_he=False,
+                             streams=1) == "n·2.4G·1ss"
+    assert d.phy_fingerprint(5320, has_ht=True, has_vht=True, has_he=False,
+                             streams=2) == "ac·5G·2ss"
+    assert d.phy_fingerprint(5320, has_ht=True, has_vht=True, has_he=True,
+                             streams=2) == "ax·5G·2ss"
+
+
+def test_phy_fingerprint_empty_when_no_caps():
+    # no capability IEs seen -> no claim (do not assert 'legacy')
+    assert d.phy_fingerprint(2437, has_ht=False, has_vht=False,
+                             has_he=False) == ""
+
+
+def test_phy_fingerprint_without_band():
+    assert d.phy_fingerprint(None, has_ht=True, has_vht=False, has_he=False,
+                             streams=1) == "n·1ss"
+    assert d.phy_fingerprint(0, has_ht=True, has_vht=False, has_he=False,
+                             streams=1) == "n·1ss"

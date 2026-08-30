@@ -64,9 +64,15 @@ COMBINED_FILTER = (f"wlan.fc.type_subtype=={BEACON} || "
 COMBINED_FIELDS = ["wlan.fc.type_subtype", "wlan.sa", "wlan.ta", "wlan.da",
                    "wlan.bssid", "radiotap.channel.freq",
                    "radiotap.dbm_antsignal", "wlan.fixed.capabilities.privacy",
+                   # PHY-capability IEs (feature 6): presence -> generation,
+                   # HT MCS rx-bitmask -> spatial streams. Numeric, single
+                   # occurrence, empty on frames without them (e.g. deauth).
+                   "wlan.ht.capabilities", "wlan.vht.capabilities",
+                   "wlan.ext_tag.he_mac_caps", "wlan.ht.mcsset.rxbitmask.8to15",
+                   "wlan.ht.mcsset.rxbitmask.16to23",
                    "wps.device_name", "wps.model_name", "wps.manufacturer",
                    "wlan.ssid"]
-_N_FIXED = 11  # fields before the (possibly '|'-containing) SSID tail
+_N_FIXED = 16  # fields before the (possibly '|'-containing) SSID tail
 
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 
@@ -88,6 +94,7 @@ def parse_combined(line):
     if len(parts) < len(COMBINED_FIELDS):
         return None
     (st, sa, ta, da, bssid, freq, sig, priv,
+     ht, vht, he, rx8, rx16,
      wps_name, wps_model, wps_manuf) = parts[:_N_FIXED]
     ssid = decode_ssid("|".join(parts[_N_FIXED:]))
     return {
@@ -99,6 +106,10 @@ def parse_combined(line):
         "freq": first_int(freq),
         "rssi": first_int(sig),
         "priv": norm_priv(priv),
+        "has_ht": bool(_first(ht)),
+        "has_vht": bool(_first(vht)),
+        "has_he": bool(_first(he)),
+        "streams": device_id.spatial_streams(_first(rx8), _first(rx16)),
         "wps_name": _first(wps_name),
         "wps_model": _first(wps_model),
         "wps_manuf": _first(wps_manuf),
@@ -148,13 +159,17 @@ class Aggregator:
             c = self.clients[mac] = {"mac": mac, "freq": rec["freq"],
                                      "rssi": rec["rssi"] if rec["rssi"] is not None
                                      else -99, "ssids": set(), "count": 0,
-                                     "last": now}
+                                     "has_ht": False, "has_vht": False,
+                                     "has_he": False, "streams": 1, "last": now}
         if rec["freq"]:
             c["freq"] = rec["freq"]
         if rec["rssi"] is not None:
             c["rssi"] = rec["rssi"]
         if rec["ssid"]:                       # a named (directed) probe
             c["ssids"].add(rec["ssid"])
+        for k in ("has_ht", "has_vht", "has_he"):
+            c[k] = c[k] or rec[k]
+        c["streams"] = max(c["streams"], rec["streams"])
         c["count"] += 1
         c["last"] = now
 
@@ -169,6 +184,8 @@ class Aggregator:
                 "freq": rec["freq"],
                 "rssi": rec["rssi"] if rec["rssi"] is not None else -99,
                 "priv": rec["priv"], "pwn": pwn,
+                "has_ht": rec["has_ht"], "has_vht": rec["has_vht"],
+                "has_he": rec["has_he"], "streams": rec["streams"],
                 "wps_name": rec["wps_name"], "wps_model": rec["wps_model"],
                 "wps_manuf": rec["wps_manuf"], "count": 1}
         else:
@@ -186,6 +203,10 @@ class Aggregator:
             for k in ("wps_name", "wps_model", "wps_manuf"):
                 if rec[k] and not n.get(k):
                     n[k] = rec[k]
+            # capability IEs: OR presence, keep the highest stream count seen
+            for k in ("has_ht", "has_vht", "has_he"):
+                n[k] = n.get(k, False) or rec[k]
+            n["streams"] = max(n.get("streams", 1), rec["streams"])
             n["count"] += 1
 
     @staticmethod
@@ -254,15 +275,24 @@ def device_or_badge(mac, oui, net=None, role="", is_flood=False, is_pwn=False):
         or device_cell(mac, oui, net, role)
 
 
+def phy_cell(rec):
+    """PHY-capability fingerprint from a network/client record (or '')."""
+    rec = rec or {}
+    return device_id.phy_fingerprint(
+        rec.get("freq"), rec.get("has_ht", False), rec.get("has_vht", False),
+        rec.get("has_he", False), rec.get("streams", 1))
+
+
 def identity_str(mac, oui, net=None, role="", is_flood=False, is_pwn=False):
-    """One-line 'Vendor · guess/badge' identity for the hunt header (or '')."""
+    """One-line 'Vendor · guess/badge · phy' identity for the hunt header (or '')."""
     vend = "rnd-MAC" if device_id.is_randomized(mac) else \
         device_id.short_vendor(device_id.vendor_for(mac, oui))
     guess = device_or_badge(mac, oui, net, role, is_flood, is_pwn)
     if guess == "·":
         guess = ""
+    phy = phy_cell(net)
     seen, out = set(), []
-    for p in (vend, guess):
+    for p in (vend, guess, phy):
         if p and p not in seen:
             out.append(p)
             seen.add(p)
@@ -404,13 +434,15 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                            "(PROBES = networks it's looking for)",
                            w - 1, curses.A_DIM)
             hdr = (f"  {'CLIENT MAC':<17} {'GHz':>6} {'RSSI':>5} "
-                   f"{'VENDOR':<12} {'#':>4}  {'PROBES (searched-for SSIDs)'}")
+                   f"{'VENDOR':<12} {'PHY':<11} {'#':>4}  "
+                   f"{'PROBES (searched-for SSIDs)'}")
             stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
 
             def client_line(r):
                 probes = ", ".join(sorted(r["ssids"])) if r["ssids"] else "—"
                 return (f"  {r['mac']:<17} {fmt_ghz(r['freq']):>6} {r['rssi']:>5} "
-                        f"{vendor_cell(r['mac'], oui):<12.12} {r['count']:>4}  "
+                        f"{vendor_cell(r['mac'], oui):<12.12} "
+                        f"{(phy_cell(r) or '—'):<11.11} {r['count']:>4}  "
                         f"{probes}")
             _draw_list(stdscr, 5, h - 6, rows, cur_probe, client_line,
                        dim=lambda r: not r["ssids"], w=w)
@@ -521,7 +553,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                     continue
                 r = rows[cur_probe]
                 return {"kind": "mac", "mac": r["mac"], "freq": r["freq"],
-                        "ident": identity_str(r["mac"], oui, role="client")}
+                        "ident": identity_str(r["mac"], oui, net=r, role="client")}
 
 
 def _draw_list(stdscr, top, maxrows, rows, cursor, line_fn, dim, w):

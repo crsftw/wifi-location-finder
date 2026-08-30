@@ -11,10 +11,11 @@ OUI = device_id.load_oui()
 
 
 def line(st, sa, bssid, freq, sig="-50", priv="0",
+         ht="", vht="", he="", rx8="", rx16="",
          wn="", wm="", wf="", ssid=""):
-    """Build one COMBINED_FIELDS pipe-line (11 fixed fields + ssid tail)."""
+    """Build one COMBINED_FIELDS pipe-line (16 fixed fields + ssid tail)."""
     return "|".join([str(st), sa, sa, "ff:ff:ff:ff:ff:ff", bssid, str(freq),
-                     sig, priv, wn, wm, wf, ssid])
+                     sig, priv, ht, vht, he, rx8, rx16, wn, wm, wf, ssid])
 
 
 def feed(lines, now=1000.0, flood_window=5.0):
@@ -132,3 +133,39 @@ def test_randomized_client_vendor_flag():
     # 0xda first octet -> locally administered (randomized)
     agg = feed([probe("da:11:22:33:44:55", 2437, "4d794e6574")])
     assert sniffer.vendor_cell("da:11:22:33:44:55", OUI) == "rnd"
+
+
+# ---- feature 6/7: capability fingerprint through the parse -> aggregator path ----
+
+def test_network_phy_fingerprint():
+    # an 802.11ac AP: HT + VHT present, 2 spatial streams (MCS 8-15 set)
+    agg = feed([line(8, "b8:11:4b:fc:f6:80", "b8:11:4b:fc:f6:80", 5320,
+                     ht="0x09ad", vht="0x0f815932", rx8="0xff",
+                     ssid="486f6d654e6574")])
+    net = agg.networks["b8:11:4b:fc:f6:80"]
+    assert net["has_ht"] and net["has_vht"] and not net["has_he"]
+    assert net["streams"] == 2
+    assert sniffer.phy_cell(net) == "ac·5G·2ss"
+
+
+def test_client_phy_fingerprint_pi_class():
+    # a single-stream 2.4GHz 802.11n client (the Pi-Zero-W / ESP class)
+    agg = feed([line(4, "d8:3a:dd:aa:bb:cc", "ff:ff:ff:ff:ff:ff", 2437,
+                     ht="0x012c", ssid="4d794e6574")])
+    c = agg.clients["d8:3a:dd:aa:bb:cc"]
+    assert sniffer.phy_cell(c) == "n·2.4G·1ss"
+
+
+def test_phy_fingerprint_absent_without_caps():
+    # a deauth frame carries no capability IEs -> no fingerprint claimed
+    agg = feed([line(8, "b8:11:4b:fc:f6:80", "b8:11:4b:fc:f6:80", 5320,
+                     ssid="486f6d654e6574")])
+    assert sniffer.phy_cell(agg.networks["b8:11:4b:fc:f6:80"]) == ""
+
+
+def test_identity_str_includes_phy():
+    agg = feed([line(8, "b8:27:eb:11:22:33", "b8:27:eb:11:22:33", 2437,
+                     ht="0x012c", ssid="70616e6963")])  # Raspberry Pi AP
+    net = agg.networks["b8:27:eb:11:22:33"]
+    ident = sniffer.identity_str(net["bssid"], OUI, net, role="ap")
+    assert ident == "Raspberry Pi · n·2.4G·1ss"
