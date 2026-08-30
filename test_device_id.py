@@ -207,3 +207,24 @@ def test_phy_fingerprint_without_band():
                              streams=1) == "n·1ss"
     assert d.phy_fingerprint(0, has_ht=True, has_vht=False, has_he=False,
                              streams=1) == "n·1ss"
+
+
+# ---- multi-BSSID collapse: base-MAC key ----
+
+def test_base_mac_key_is_first_five_octets():
+    assert d.base_mac_key("b8:11:4b:fc:f6:80") == "b8:11:4b:fc:f6"
+    assert d.base_mac_key("b8:11:4b:fc:f6:8f") == "b8:11:4b:fc:f6"
+    assert d.base_mac_key("B8-11-4B-FC-F6-80") == "b8:11:4b:fc:f6"
+
+
+def test_base_mac_key_differs_across_radios():
+    assert d.base_mac_key("b8:11:4b:fc:f6:80") != d.base_mac_key("f8:6b:d9:49:79:a0")
+
+
+def test_base_mac_key_none_for_junk():
+    assert d.base_mac_key("") is None
+    assert d.base_mac_key("xx:yy:zz:11:22:33") is None
+
+
+def test_base_mac_display():
+    assert d.base_mac_display("b8:11:4b:fc:f6:80") == "b8:11:4b:fc:f6:**"

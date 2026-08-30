@@ -134,6 +134,34 @@ def oui_key(mac):
     return None
 
 
+def base_mac_key(mac):
+    """The first five octets of a MAC as 'aa:bb:cc:dd:ee', or None.
+
+    APs that broadcast several BSSIDs from one physical radio allocate them in a
+    contiguous block that shares the top five octets (the origin-case radio uses
+    b8:11:4b:fc:f6:8x). Grouping on this key collapses those BSSIDs into one
+    device. The shared prefix also guarantees a shared OUI, hence one vendor.
+    """
+    if not mac:
+        return None
+    hexonly = re.sub(r"[^0-9a-fA-F]", "", str(mac))
+    m = re.match(r"^([0-9a-fA-F]{2})[:-]([0-9a-fA-F]{2})[:-]([0-9a-fA-F]{2})"
+                 r"[:-]([0-9a-fA-F]{2})[:-]([0-9a-fA-F]{2})[:-][0-9a-fA-F]{2}$",
+                 str(mac).strip())
+    if m:
+        return ":".join(g.lower() for g in m.groups())
+    if len(hexonly) == 12:
+        b = hexonly.lower()
+        return ":".join(b[i:i + 2] for i in range(0, 10, 2))
+    return None
+
+
+def base_mac_display(mac):
+    """A device's base MAC for display, e.g. 'b8:11:4b:fc:f6:**' (or '')."""
+    k = base_mac_key(mac)
+    return f"{k}:**" if k else ""
+
+
 def _first_octet(mac):
     k = oui_key(mac)
     if k is None:

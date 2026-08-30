@@ -6,7 +6,8 @@ or a specific MAC, then walk down its transmitter with the RSSI meter.
 Built on router_hunt.py. One selection screen with four modes you cycle with
 the S key:
 
-  1. NETWORKS      - every AP heard (hidden ones included), like router_hunt.
+  1. NETWORKS      - APs heard (hidden ones included), collapsed to one row per
+                     physical radio by default (g toggles per-SSID).
   2. DEAUTH FLOODS - channels under a deauthentication flood, ranked by rate,
                      with a "all deauths on ch N" row for spoofed/randomised
                      sources.
@@ -221,6 +222,42 @@ class Aggregator:
     def client_rows(self):
         return sorted(self.clients.values(), key=lambda r: r["rssi"], reverse=True)
 
+    def device_rows(self):
+        """Networks collapsed into physical devices: BSSIDs sharing the first
+        five MAC octets (one radio's block) become one row. Strongest first."""
+        groups = {}
+        for n in self.networks.values():
+            key = device_id.base_mac_key(n["bssid"]) or n["bssid"]
+            g = groups.get(key)
+            if g is None:
+                g = groups[key] = {
+                    "base": key, "bssids": set(), "ssids": set(),
+                    "rssi": -99, "freq": n["freq"], "priv": n["priv"],
+                    "pwn": False, "count": 0, "has_ht": False,
+                    "has_vht": False, "has_he": False, "streams": 1,
+                    "wps_name": "", "wps_model": "", "wps_manuf": "",
+                    "_best": -99}
+            g["bssids"].add(n["bssid"])
+            if n["ssid"]:
+                g["ssids"].add(n["ssid"])
+            g["count"] += n["count"]
+            g["pwn"] = g["pwn"] or n.get("pwn", False)
+            g["priv"] = n["priv"] or g["priv"]
+            for k in ("has_ht", "has_vht", "has_he"):
+                g[k] = g[k] or n.get(k, False)
+            g["streams"] = max(g["streams"], n.get("streams", 1))
+            for k in ("wps_name", "wps_model", "wps_manuf"):
+                if n.get(k) and not g[k]:
+                    g[k] = n[k]
+            if n["rssi"] > g["_best"]:          # follow the strongest member
+                g["_best"] = g["rssi"] = n["rssi"]
+                g["freq"] = n["freq"]
+                g["primary_ssid"] = n["ssid"]
+                g["strong_bssid"] = n["bssid"]
+        for g in groups.values():
+            g["n_bssids"] = len(g["bssids"])
+        return sorted(groups.values(), key=lambda r: r["rssi"], reverse=True)
+
     def flood_rows(self, now=None, rate_threshold=2.0):
         """Rows for the deauth-flood view: an 'all deauths on ch N' row per
         active channel, plus a per-source row, hottest channel first."""
@@ -344,6 +381,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
 
     mode = MODE_NET
     cur_net = cur_flood = cur_probe = 0
+    grouped = True             # NETWORKS: collapse one radio's BSSIDs into a device row
     selected = set()
     mac_input = ""
     mac_error = ""
@@ -381,24 +419,48 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
         stdscr.addnstr(1, 6 + bar_w, f"] {tail}", w - 1, curses.A_DIM)
 
         if mode == MODE_NET:
-            rows = agg.network_rows()
-            cur_net = max(0, min(cur_net, len(rows) - 1)) if rows else 0
+            view = "devices" if grouped else "SSIDs"
             stdscr.addnstr(3, 0, "UP/DOWN move  SPACE select  ENTER hunt  "
-                           f"({len(selected)} selected)", w - 1, curses.A_DIM)
-            hdr = (f"  {'SSID':<16} {'BSSID':<17} {'ch':>3} {'GHz':>6} "
+                           f"[g] view: {view}  ({len(selected)} selected)",
+                           w - 1, curses.A_DIM)
+            colname = "DEVICE (BSSID)" if grouped else "BSSID"
+            hdr = (f"  {'SSID':<16} {colname:<17} {'ch':>3} {'GHz':>6} "
                    f"{'RSSI':>5} {'enc':>4} {'VENDOR':<12} {'DEVICE':<14} "
                    f"{'seen':>5}")
             stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
-            _draw_list(stdscr, 5, h - 6, rows, cur_net,
-                       lambda r: (f"[{'x' if r['bssid'] in selected else ' '}] "
-                                  f"{ssid_display(r):<16.16} {r['bssid']:<17} "
-                                  f"{f2c.get(r['freq'],'?'):>3} {fmt_ghz(r['freq']):>6} "
-                                  f"{r['rssi']:>5} "
-                                  f"{'wpa' if r['priv']=='1' else 'open':>4} "
-                                  f"{vendor_cell(r['bssid'], oui):<12.12} "
-                                  f"{device_or_badge(r['bssid'], oui, r, role='ap', is_pwn=r.get('pwn', False)):<14.14} "
-                                  f"{r['count']:>5}"),
-                       dim=lambda r: r["hidden"], w=w)
+            if grouped:
+                rows = agg.device_rows()
+                cur_net = max(0, min(cur_net, len(rows) - 1)) if rows else 0
+
+                def dev_line(r):
+                    name = r.get("primary_ssid") or "<hidden>"
+                    if r["n_bssids"] > 1:
+                        name = f"{name} +{r['n_bssids'] - 1}"
+                    mark = ("x" if r["bssids"] <= selected
+                            else "~" if r["bssids"] & selected else " ")
+                    b = r["strong_bssid"]
+                    return (f"[{mark}] {name:<16.16} {r['base'] + ':**':<17} "
+                            f"{f2c.get(r['freq'],'?'):>3} {fmt_ghz(r['freq']):>6} "
+                            f"{r['rssi']:>5} "
+                            f"{'wpa' if r['priv']=='1' else 'open':>4} "
+                            f"{vendor_cell(b, oui):<12.12} "
+                            f"{device_or_badge(b, oui, r, role='ap', is_pwn=r['pwn']):<14.14} "
+                            f"{r['count']:>5}")
+                _draw_list(stdscr, 5, h - 6, rows, cur_net, dev_line,
+                           dim=lambda r: not r["ssids"], w=w)
+            else:
+                rows = agg.network_rows()
+                cur_net = max(0, min(cur_net, len(rows) - 1)) if rows else 0
+                _draw_list(stdscr, 5, h - 6, rows, cur_net,
+                           lambda r: (f"[{'x' if r['bssid'] in selected else ' '}] "
+                                      f"{ssid_display(r):<16.16} {r['bssid']:<17} "
+                                      f"{f2c.get(r['freq'],'?'):>3} {fmt_ghz(r['freq']):>6} "
+                                      f"{r['rssi']:>5} "
+                                      f"{'wpa' if r['priv']=='1' else 'open':>4} "
+                                      f"{vendor_cell(r['bssid'], oui):<12.12} "
+                                      f"{device_or_badge(r['bssid'], oui, r, role='ap', is_pwn=r.get('pwn', False)):<14.14} "
+                                      f"{r['count']:>5}"),
+                           dim=lambda r: r["hidden"], w=w)
 
         elif mode == MODE_FLOOD:
             rows = agg.flood_rows(now, args.rate)
@@ -504,6 +566,9 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
             return None
         if c in (ord("S"), ord("s")):
             mode = (mode + 1) % N_MODES
+        elif c in (ord("g"), ord("G")) and mode == MODE_NET:
+            grouped = not grouped
+            cur_net = 0
         elif c in (curses.KEY_DOWN, ord("j")):
             if mode == MODE_NET:
                 cur_net += 1
@@ -519,16 +584,34 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
             elif mode == MODE_PROBE:
                 cur_probe = max(0, cur_probe - 1)
         elif c == ord(" ") and mode == MODE_NET:
-            rows = agg.network_rows()
-            if rows:
-                selected.symmetric_difference_update({rows[cur_net]["bssid"]})
+            if grouped:
+                rows = agg.device_rows()
+                if rows:
+                    members = rows[cur_net]["bssids"]
+                    # deselect the whole device if fully selected, else select it
+                    if members <= selected:
+                        selected.difference_update(members)
+                    else:
+                        selected.update(members)
+            else:
+                rows = agg.network_rows()
+                if rows:
+                    selected.symmetric_difference_update({rows[cur_net]["bssid"]})
         elif c in (curses.KEY_ENTER, 10, 13):
             if mode == MODE_NET:
-                rows = agg.network_rows()
+                rows = agg.network_rows()   # hunt always works on real BSSIDs
                 if not rows:
                     continue
-                targets = selected or {rows[cur_net]["bssid"]}
+                if selected:
+                    targets = set(selected)
+                elif grouped:
+                    devs = agg.device_rows()
+                    targets = devs[cur_net]["bssids"] if devs else set()
+                else:
+                    targets = {rows[cur_net]["bssid"]}
                 chosen = [r for r in rows if r["bssid"] in targets]
+                if not chosen:
+                    continue
                 chosen.sort(key=lambda r: r["rssi"], reverse=True)
                 strongest = chosen[0]
                 return {"kind": "net",
