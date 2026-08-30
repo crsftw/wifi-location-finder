@@ -196,29 +196,92 @@ def parse_hunt(line):
 # Channel hopper (discovery only)
 # ==========================================================================
 
+# ==========================================================================
+# Adaptive (weighted) channel hopping
+# ==========================================================================
+# The receiver can only listen to one channel at a time, so uniform hopping
+# gives every channel the same slice regardless of whether anything is there.
+# Adaptive hopping keeps visiting *every* channel each sweep (so nothing is
+# starved), but scales the dwell to recent activity: a flooded channel gets the
+# most time, an active one the base dwell, and a silent one the minimum - which
+# shortens sweeps and densifies the frame stream on the channels that matter.
+
+PRIMARY_24 = {1, 6, 11}   # kept warm even when momentarily quiet
+
+
+def channel_dwell(score, base, lo, hi, priority=False, hot=15):
+    """Dwell (seconds) for a channel given its recent activity score.
+
+    Tiers: flood-level activity (score >= hot) -> hi; any activity -> base;
+    a quiet 2.4GHz primary -> base (kept warm); otherwise -> lo.
+    """
+    if score >= hot:
+        return hi
+    if score > 0:
+        return base
+    if priority:
+        return base
+    return lo
+
+
+def weighted_schedule(chans, activity, base, lo, hi, hot=15):
+    """Next sweep as a list of (chan, freq, band, dwell).
+
+    Every channel is included, in the given order (no starvation, bounded
+    latency); only the per-channel dwell varies with `activity` (a {freq: count}
+    snapshot of frames heard recently).
+    """
+    sched = []
+    for chan, freq, band in chans:
+        score = activity.get(freq, 0)
+        d = channel_dwell(score, base, lo, hi, priority=chan in PRIMARY_24, hot=hot)
+        sched.append((chan, freq, band, d))
+    return sched
+
+
 class Hopper(threading.Thread):
     daemon = True
 
-    def __init__(self, iface, chans, dwell):
+    def __init__(self, iface, chans, dwell, adaptive=False,
+                 min_dwell=0.3, max_dwell=3.0, hot=50):
         super().__init__()
         self.iface = iface
         self.chans = chans
-        self.dwell = dwell
+        self.dwell = dwell            # base dwell (also the uniform dwell)
+        self.adaptive = adaptive
+        self.min_dwell = min(min_dwell, dwell)
+        self.max_dwell = max(max_dwell, dwell)
+        self.hot = hot
+        self._activity = {}           # freq -> recent frame count (set externally)
         self.stop_flag = threading.Event()
         self.current = None
         self.total = len(chans)   # channels in one full sweep of all bands
         self.idx = 0              # 1-based position in the current sweep
         self.passes = 0           # completed full sweeps
 
+    def set_activity(self, activity):
+        """Update the per-channel activity snapshot used for weighting.
+
+        Called from the capture-draining loop; a plain dict reference swap is
+        the only shared state, so no lock is needed.
+        """
+        self._activity = activity or {}
+
+    def _sweep(self):
+        if self.adaptive:
+            return weighted_schedule(self.chans, self._activity, self.dwell,
+                                     self.min_dwell, self.max_dwell, self.hot)
+        return [(c, f, b, self.dwell) for c, f, b in self.chans]
+
     def run(self):
         while not self.stop_flag.is_set():
-            for i, (chan, freq, band) in enumerate(self.chans):
+            for i, (chan, freq, band, dwell) in enumerate(self._sweep()):
                 if self.stop_flag.is_set():
                     return
                 self.idx = i + 1
                 if set_channel(self.iface, chan, freq):
                     self.current = (chan, freq)
-                self.stop_flag.wait(self.dwell)
+                self.stop_flag.wait(dwell)
             self.passes += 1
 
     def stop(self):
