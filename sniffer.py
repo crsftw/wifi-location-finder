@@ -134,13 +134,14 @@ class Aggregator:
     def _add_net(self, rec):
         b = rec["bssid"]
         hidden = (rec["st"] == BEACON) and (not rec["ssid"])
+        pwn = (b == device_id.PWNAGOTCHI_BSSID)  # pwnagotchi advertisement beacon
         n = self.networks.get(b)
         if n is None:
             self.networks[b] = {
                 "bssid": b, "ssid": rec["ssid"], "hidden": hidden,
                 "freq": rec["freq"],
                 "rssi": rec["rssi"] if rec["rssi"] is not None else -99,
-                "priv": rec["priv"],
+                "priv": rec["priv"], "pwn": pwn,
                 "wps_name": rec["wps_name"], "wps_model": rec["wps_model"],
                 "wps_manuf": rec["wps_manuf"], "count": 1}
         else:
@@ -216,11 +217,18 @@ def device_cell(mac, oui, net=None, role=""):
         net.get("wps_manuf", ""), role) or "·"
 
 
-def identity_str(mac, oui, net=None, role=""):
-    """One-line 'Vendor · guess' identity for the hunt header (or '')."""
+def device_or_badge(mac, oui, net=None, role="", is_flood=False, is_pwn=False):
+    """DEVICE column: a threat badge (pwnagotchi/deauther) if one applies,
+    otherwise the plain device guess."""
+    return device_id.deauther_badge(mac, oui, is_flood, is_pwn) \
+        or device_cell(mac, oui, net, role)
+
+
+def identity_str(mac, oui, net=None, role="", is_flood=False, is_pwn=False):
+    """One-line 'Vendor · guess/badge' identity for the hunt header (or '')."""
     vend = "rnd-MAC" if device_id.is_randomized(mac) else \
         device_id.short_vendor(device_id.vendor_for(mac, oui))
-    guess = device_cell(mac, oui, net, role)
+    guess = device_or_badge(mac, oui, net, role, is_flood, is_pwn)
     if guess == "·":
         guess = ""
     seen, out = set(), []
@@ -317,7 +325,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
             stdscr.addnstr(3, 0, "UP/DOWN move  SPACE select  ENTER hunt  "
                            f"({len(selected)} selected)", w - 1, curses.A_DIM)
             hdr = (f"  {'SSID':<16} {'BSSID':<17} {'ch':>3} {'GHz':>6} "
-                   f"{'RSSI':>5} {'enc':>4} {'VENDOR':<12} {'DEVICE':<12} "
+                   f"{'RSSI':>5} {'enc':>4} {'VENDOR':<12} {'DEVICE':<14} "
                    f"{'seen':>5}")
             stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
             _draw_list(stdscr, 5, h - 6, rows, cur_net,
@@ -327,7 +335,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                                   f"{r['rssi']:>5} "
                                   f"{'wpa' if r['priv']=='1' else 'open':>4} "
                                   f"{vendor_cell(r['bssid'], oui):<12.12} "
-                                  f"{device_cell(r['bssid'], oui, r, role='ap'):<12.12} "
+                                  f"{device_or_badge(r['bssid'], oui, r, role='ap', is_pwn=r.get('pwn', False)):<14.14} "
                                   f"{r['count']:>5}"),
                        dim=lambda r: r["hidden"], w=w)
 
@@ -338,7 +346,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                            "(⚑ = flood; 'all' row tracks every deauth on that ch)",
                            w - 1, curses.A_DIM)
             hdr = (f"    {'GHz':>6} {'ch':>3}  {'source':<17} "
-                   f"{'VENDOR':<12} {'DEVICE':<12} {'d/s':>6} {'RSSI':>5}")
+                   f"{'VENDOR':<12} {'DEVICE':<14} {'d/s':>6} {'RSSI':>5}")
             stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
 
             def flood_line(r):
@@ -349,10 +357,11 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                 else:
                     who = r["src"]
                     vend = vendor_cell(r["src"], oui)
-                    dev = device_cell(r["src"], oui, role="attacker")
+                    dev = device_or_badge(r["src"], oui, role="attacker",
+                                          is_flood=r["flood"])
                     rssi = f"{r['rssi']:>5}" if r["rssi"] is not None else "   -"
                 return (f"{flag} {fmt_ghz(r['freq']):>6} {f2c.get(r['freq'],'?'):>3}  "
-                        f"{who:<17.17} {vend:<12.12} {dev:<12.12} "
+                        f"{who:<17.17} {vend:<12.12} {dev:<14.14} "
                         f"{r['rate']:>6.1f} {rssi:>5}")
             _draw_list(stdscr, 5, h - 6, rows, cur_flood, flood_line,
                        dim=lambda r: not r["flood"], w=w)
@@ -441,7 +450,8 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                         "bssids": {r["bssid"] for r in chosen},
                         "freq": strongest["freq"],
                         "ident": identity_str(strongest["bssid"], oui,
-                                              strongest, role="ap")}
+                                              strongest, role="ap",
+                                              is_pwn=strongest.get("pwn", False))}
             elif mode == MODE_FLOOD:
                 rows = agg.flood_rows(now, args.rate)
                 if not rows:
@@ -450,7 +460,8 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                 if r["kind"] == "all":
                     return {"kind": "flood_all", "freq": r["freq"]}
                 return {"kind": "flood_src", "src": r["src"], "freq": r["freq"],
-                        "ident": identity_str(r["src"], oui, role="attacker")}
+                        "ident": identity_str(r["src"], oui, role="attacker",
+                                              is_flood=r["flood"])}
 
 
 def _draw_list(stdscr, top, maxrows, rows, cursor, line_fn, dim, w):
