@@ -12,23 +12,79 @@ associates or scans (see [Receive-only, and provably so](#receive-only-and-prova
 ## `sniffer.py` — the all-in-one tool
 
 Start it and you get a channel-hopping **scan screen**. Press **`S`** to cycle
-between three modes; hit **ENTER** on a target and you drop into a shared RSSI
+between four modes; hit **ENTER** on a target and you drop into a shared RSSI
 **hunt screen** to direction-find it.
 
 | Mode (`S` to switch) | What it lists | ENTER hunts |
 |---|---|---|
-| **NETWORKS** | every AP heard, hidden ones as `<hidden>` (SSID, BSSID, ch, **GHz**, RSSI, enc). `SPACE` multi-selects (e.g. all BSSIDs of one router) | that AP's transmitter |
-| **DEAUTH FLOODS** | channels under a deauth flood, ranked by deauths/sec, `⚑` = flood. A `ALL deauths on ch N` row per channel handles spoofed/randomised sources | the attacker's transmitter (or every deauth on that channel) |
+| **NETWORKS** | every AP heard, hidden ones as `<hidden>` (SSID, BSSID, ch, **GHz**, RSSI, enc, **VENDOR**, **DEVICE**). `SPACE` multi-selects (e.g. all BSSIDs of one router) | that AP's transmitter |
+| **DEAUTH FLOODS** | channels under a deauth flood, ranked by deauths/sec, `⚑` = flood, with **VENDOR**/**DEVICE** for each source. A `ALL deauths on ch N` row per channel handles spoofed/randomised sources | the attacker's transmitter (or every deauth on that channel) |
+| **PROBE CLIENTS** | client devices heard probing (phones, laptops, IoT), ranked by RSSI, with **VENDOR**, a **PHY** capability class, and the **PROBES** column — the named networks each client is searching for (its saved-network list, which ties a device to its home/work SSIDs) | that client's transmitter |
 | **TRACK MAC** | a text box — type a MAC | that MAC, **auto-located** by hopping until it's heard, then parked on its channel |
 
 Every list has a **GHz** column showing whether the target transmits on **2.x**
 or **5.x GHz**.
 
+### Device identification (VENDOR / DEVICE columns)
+
+The scan lists carry these passive-identity columns, and the identity follows you into
+the hunt header (`deauth src fe:ff:ff:ff:ff:ff [attacker]`):
+
+- **VENDOR** — the transmitter's manufacturer, resolved from its MAC's OUI against
+  the on-box IEEE database (`/usr/share/ieee-data/oui.txt`). A **`rnd`** here means
+  the MAC is locally-administered (randomized), so the OUI is meaningless — common
+  for modern phones/laptops, rare for routers, Raspberry Pis, or ESP-based hardware.
+- **DEVICE** — a best-effort guess of *what it is*, most specific first: the
+  cleartext **WPS** device/model name from beacons (often the exact router model,
+  sometimes literally the hostname) → a known device-maker (**Raspberry Pi**,
+  **ESP32/8266**…) → the frame's role (**AP** / **attacker**).
+
+So a Pi-based deauther shows up as `Raspberry Pi` / `attacker`, and a TP-Link AP
+advertising WPS as `TP-Link` / `Archer C7` at a glance. All of this is passive
+metadata already in the frames — still **receive-only**, no probing. If the OUI
+database isn't installed, the columns stay sparse (install the `ieee-data` package).
+
+#### Pwnagotchi / deauther badges
+
+The DEVICE column also surfaces a **threat badge** when a transmitter looks like
+an attack device, from solid signals only (no fragile payload guessing):
+
+| Badge | Meaning | Signal |
+|---|---|---|
+| `⚠ pwnagotchi` | a pwnagotchi is present, announcing itself | a beacon whose BSSID is `de:ad:be:ef:de:ad` — pwnagotchi's advertisement signature (definitive, no `?`) |
+| `⚠ pwnagotchi?` | likely a pwnagotchi / Pi-based deauther | a **deauth flood** whose source has a **Raspberry Pi** OUI |
+| `⚠ ESP deauther?` | likely an ESP8266/ESP32 "Deauther" board | a deauth flood whose source has an **Espressif** OUI |
+| `⚠ deauther?` | some device is flooding deauths | a deauth flood from any other (or spoofed) source |
+
+The `?` marks strong-but-not-certain evidence; the bare `de:ad:be:ef:de:ad`
+beacon is certain. The badge follows a target into the hunt header
+(`deauth src b8:27:eb:… [Raspberry Pi · ⚠ pwnagotchi?]`). Note that a pwnagotchi
+randomises the *transmitter* of its advertisement beacons, so those aren't
+reliably huntable — the huntable target is its deauth-flooding radio (the
+Raspberry-Pi-OUI source), which the badge points you straight at.
+
+#### Capability fingerprint (PHY class)
+
+Beacons and probe requests advertise a device's 802.11 capabilities, which give
+a coarse **device class** independent of the OUI. From the HT/VHT/HE capability
+elements and the HT MCS map, each transmitter gets a compact fingerprint:
+
+- **generation** — `ax` (HE / Wi-Fi 6), `ac` (VHT / Wi-Fi 5), `n` (HT / Wi-Fi 4);
+- **band** — `2.4G` / `5G` (from the frequency);
+- **spatial streams** — `1ss` / `2ss` / `3ss` (from the MCS Rx bitmask).
+
+So a single-stream 2.4 GHz 802.11n device reads `n·2.4G·1ss` — the class of a
+Raspberry Pi Zero W or an ESP board — while a modern phone reads `ax·5G·2ss`.
+The fingerprint shows as the **PHY** column in PROBE CLIENTS and is folded into
+the hunt header (`[Raspberry Pi · n·2.4G·1ss]`) so you know what you're walking
+toward. It stays blank when no capability elements were seen — no unconfirmed
+guesses.
+
 Direction finding tracks the **transmitter only** (`wlan.sa` / `wlan.ta`), never
 the destination: RSSI is the strength of whoever *sent* the frame, so a frame
 *to* your target carries some other radio's signal and would point the wrong way.
 
-### The hunt screen (shared by all three modes)
+### The hunt screen (shared by all four modes)
 
 - **Big dBm readout**, rolling average, **peak-hold**, and a live sparkline.
 - **Gradient bars** — a red → orange → yellow → green ramp (weak → strong).
@@ -57,7 +113,7 @@ on a target. `init-hunt.sh` still does the one-time monitor-mode setup.
 
 | Where | Key | Action |
 |---|---|---|
-| Scan screen | `S` | switch mode: NETWORKS → DEAUTH FLOODS → TRACK MAC |
+| Scan screen | `S` | switch mode: NETWORKS → DEAUTH FLOODS → PROBE CLIENTS → TRACK MAC |
 | | ↑ / ↓ | move the cursor |
 | | `SPACE` | (NETWORKS) select / deselect |
 | | `ENTER` | hunt the selected/typed target |
@@ -155,8 +211,10 @@ retunes the receiver with `iw`; retuning is not transmitting.
 | `old_scripts/make_test_capture.py` | Synthesises a pcap with the exact signature, for off-site validation |
 
 `sniffer.py` imports the capture, hopping, hunt, audio and colour code from
-`router_hunt.py` / `deauth_hunt.py` / `deauth_sweep.py`, so those four `.py`
-files must stay together in this folder.
+`router_hunt.py` / `deauth_hunt.py` / `deauth_sweep.py`, and the vendor/device
+identification from `device_id.py`, so those five `.py` files must stay together
+in this folder. (`device_id.py` is standalone and unit-tested in
+`test_device_id.py` — run `pytest`.)
 
 ### Which tool when
 

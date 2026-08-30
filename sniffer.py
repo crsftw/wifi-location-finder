@@ -3,14 +3,16 @@
 sniffer.py - all-in-one WiFi direction finder: pick a network, a deauth flood,
 or a specific MAC, then walk down its transmitter with the RSSI meter.
 
-Built on router_hunt.py. One selection screen with three modes you cycle with
+Built on router_hunt.py. One selection screen with four modes you cycle with
 the S key:
 
   1. NETWORKS      - every AP heard (hidden ones included), like router_hunt.
   2. DEAUTH FLOODS - channels under a deauthentication flood, ranked by rate,
                      with a "all deauths on ch N" row for spoofed/randomised
                      sources.
-  3. TRACK MAC     - type a MAC; it is auto-located by channel-hopping, then
+  3. PROBE CLIENTS - client devices heard probing, with the named networks each
+                     is searching for (its saved-network list).
+  4. TRACK MAC     - type a MAC; it is auto-located by channel-hopping, then
                      tracked.
 
 Hitting ENTER on any of them drops into the exact same RSSI hunt screen as
@@ -43,19 +45,34 @@ from router_hunt import (CaptureThread, Hopper, hunt, build_target_filter,
                          valid_mac, freq_to_chan_map, decode_ssid, norm_priv,
                          ssid_display, first_int, directional_reminder,
                          parse_hunt, HUNT_FIELDS, BEACON, PROBE_RESP, Beeper)
+import device_id
 
 DEAUTH = 12
+PROBE_REQ = 4
 
-# One capture feeds all three modes: beacons + probe responses (for networks)
-# and deauthentication frames (for floods / activity), hopping across channels.
+# One capture feeds all four modes: beacons + probe responses (for networks),
+# deauthentication frames (for floods / activity), and probe requests (for the
+# client view), hopping across channels.
 COMBINED_FILTER = (f"wlan.fc.type_subtype=={BEACON} || "
                    f"wlan.fc.type_subtype=={PROBE_RESP} || "
-                   f"wlan.fc.type_subtype=={DEAUTH}")
+                   f"wlan.fc.type_subtype=={DEAUTH} || "
+                   f"wlan.fc.type_subtype=={PROBE_REQ}")
 # SSID is last: it may itself contain the '|' separator, so we rejoin the tail.
+# The three WPS identity fields (cleartext device name/model/manufacturer from
+# WPS-enabled beacons and probe-responses) sit just before it at fixed indices;
+# they are controlled device strings and in practice never contain a '|'.
 COMBINED_FIELDS = ["wlan.fc.type_subtype", "wlan.sa", "wlan.ta", "wlan.da",
                    "wlan.bssid", "radiotap.channel.freq",
                    "radiotap.dbm_antsignal", "wlan.fixed.capabilities.privacy",
+                   # PHY-capability IEs (feature 6): presence -> generation,
+                   # HT MCS rx-bitmask -> spatial streams. Numeric, single
+                   # occurrence, empty on frames without them (e.g. deauth).
+                   "wlan.ht.capabilities", "wlan.vht.capabilities",
+                   "wlan.ext_tag.he_mac_caps", "wlan.ht.mcsset.rxbitmask.8to15",
+                   "wlan.ht.mcsset.rxbitmask.16to23",
+                   "wps.device_name", "wps.model_name", "wps.manufacturer",
                    "wlan.ssid"]
+_N_FIXED = 16  # fields before the (possibly '|'-containing) SSID tail
 
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 
@@ -67,21 +84,35 @@ def fmt_ghz(freq):
     return f"{freq / 1000:.1f}GHz"
 
 
+def _first(v):
+    """First comma-joined occurrence of a tshark field, trimmed."""
+    return v.split(",")[0].strip()
+
+
 def parse_combined(line):
     parts = line.split("|")
     if len(parts) < len(COMBINED_FIELDS):
         return None
-    st, sa, ta, da, bssid, freq, sig, priv = parts[:8]
-    ssid = decode_ssid("|".join(parts[8:]))
+    (st, sa, ta, da, bssid, freq, sig, priv,
+     ht, vht, he, rx8, rx16,
+     wps_name, wps_model, wps_manuf) = parts[:_N_FIXED]
+    ssid = decode_ssid("|".join(parts[_N_FIXED:]))
     return {
         "st": first_int(st),
-        "sa": sa.split(",")[0].strip().lower(),
-        "ta": ta.split(",")[0].strip().lower(),
-        "da": da.split(",")[0].strip().lower(),
-        "bssid": bssid.split(",")[0].strip().lower(),
+        "sa": _first(sa).lower(),
+        "ta": _first(ta).lower(),
+        "da": _first(da).lower(),
+        "bssid": _first(bssid).lower(),
         "freq": first_int(freq),
         "rssi": first_int(sig),
         "priv": norm_priv(priv),
+        "has_ht": bool(_first(ht)),
+        "has_vht": bool(_first(vht)),
+        "has_he": bool(_first(he)),
+        "streams": device_id.spatial_streams(_first(rx8), _first(rx16)),
+        "wps_name": _first(wps_name),
+        "wps_model": _first(wps_model),
+        "wps_manuf": _first(wps_manuf),
         "ssid": ssid,
     }
 
@@ -99,6 +130,7 @@ class Aggregator:
         self.chan_ts = {}         # freq -> deque[ts]  (all deauths on channel)
         self.deauth_rssi = {}     # (freq, src) -> last rssi
         self.seen_ch = {}         # mac -> freq last transmitted on
+        self.clients = {}         # client mac -> record (probe-request view)
 
     def add(self, rec, now=None):
         now = time.time() if now is None else now
@@ -115,17 +147,47 @@ class Aggregator:
             self.chan_ts.setdefault(freq, deque()).append(now)
             if rec["rssi"] is not None:
                 self.deauth_rssi[(freq, src)] = rec["rssi"]
+        elif rec["st"] == PROBE_REQ:
+            self._add_client(rec, now)
+
+    def _add_client(self, rec, now):
+        mac = rec["sa"]
+        if not mac or mac == BROADCAST:
+            return
+        c = self.clients.get(mac)
+        if c is None:
+            c = self.clients[mac] = {"mac": mac, "freq": rec["freq"],
+                                     "rssi": rec["rssi"] if rec["rssi"] is not None
+                                     else -99, "ssids": set(), "count": 0,
+                                     "has_ht": False, "has_vht": False,
+                                     "has_he": False, "streams": 1, "last": now}
+        if rec["freq"]:
+            c["freq"] = rec["freq"]
+        if rec["rssi"] is not None:
+            c["rssi"] = rec["rssi"]
+        if rec["ssid"]:                       # a named (directed) probe
+            c["ssids"].add(rec["ssid"])
+        for k in ("has_ht", "has_vht", "has_he"):
+            c[k] = c[k] or rec[k]
+        c["streams"] = max(c["streams"], rec["streams"])
+        c["count"] += 1
+        c["last"] = now
 
     def _add_net(self, rec):
         b = rec["bssid"]
         hidden = (rec["st"] == BEACON) and (not rec["ssid"])
+        pwn = (b == device_id.PWNAGOTCHI_BSSID)  # pwnagotchi advertisement beacon
         n = self.networks.get(b)
         if n is None:
             self.networks[b] = {
                 "bssid": b, "ssid": rec["ssid"], "hidden": hidden,
                 "freq": rec["freq"],
                 "rssi": rec["rssi"] if rec["rssi"] is not None else -99,
-                "priv": rec["priv"], "count": 1}
+                "priv": rec["priv"], "pwn": pwn,
+                "has_ht": rec["has_ht"], "has_vht": rec["has_vht"],
+                "has_he": rec["has_he"], "streams": rec["streams"],
+                "wps_name": rec["wps_name"], "wps_model": rec["wps_model"],
+                "wps_manuf": rec["wps_manuf"], "count": 1}
         else:
             if rec["ssid"]:
                 n["ssid"] = rec["ssid"]
@@ -137,6 +199,14 @@ class Aggregator:
             if rec["rssi"] is not None:
                 n["rssi"] = rec["rssi"]
             n["priv"] = rec["priv"] or n["priv"]
+            # WPS strings are stable per device - keep the first non-empty seen
+            for k in ("wps_name", "wps_model", "wps_manuf"):
+                if rec[k] and not n.get(k):
+                    n[k] = rec[k]
+            # capability IEs: OR presence, keep the highest stream count seen
+            for k in ("has_ht", "has_vht", "has_he"):
+                n[k] = n.get(k, False) or rec[k]
+            n["streams"] = max(n.get("streams", 1), rec["streams"])
             n["count"] += 1
 
     @staticmethod
@@ -147,6 +217,9 @@ class Aggregator:
 
     def network_rows(self):
         return sorted(self.networks.values(), key=lambda r: r["rssi"], reverse=True)
+
+    def client_rows(self):
+        return sorted(self.clients.values(), key=lambda r: r["rssi"], reverse=True)
 
     def flood_rows(self, now=None, rate_threshold=2.0):
         """Rows for the deauth-flood view: an 'all deauths on ch N' row per
@@ -175,24 +248,77 @@ class Aggregator:
         return rows
 
 
+# ==========================================================================
+# Passive device identity (feature slice 1+2+3): vendor + device guess, shown
+# as two columns in the lists and folded into the hunt header.
+# ==========================================================================
+
+def vendor_cell(mac, oui):
+    """VENDOR column: 'rnd' for a randomized MAC, the OUI vendor, or '·'."""
+    if device_id.is_randomized(mac):
+        return "rnd"
+    return device_id.short_vendor(device_id.vendor_for(mac, oui)) or "·"
+
+
+def device_cell(mac, oui, net=None, role=""):
+    """DEVICE column: WPS model/name > device-maker OUI > role > rnd, or '·'."""
+    net = net or {}
+    return device_id.device_guess(
+        mac, oui, net.get("wps_name", ""), net.get("wps_model", ""),
+        net.get("wps_manuf", ""), role) or "·"
+
+
+def device_or_badge(mac, oui, net=None, role="", is_flood=False, is_pwn=False):
+    """DEVICE column: a threat badge (pwnagotchi/deauther) if one applies,
+    otherwise the plain device guess."""
+    return device_id.deauther_badge(mac, oui, is_flood, is_pwn) \
+        or device_cell(mac, oui, net, role)
+
+
+def phy_cell(rec):
+    """PHY-capability fingerprint from a network/client record (or '')."""
+    rec = rec or {}
+    return device_id.phy_fingerprint(
+        rec.get("freq"), rec.get("has_ht", False), rec.get("has_vht", False),
+        rec.get("has_he", False), rec.get("streams", 1))
+
+
+def identity_str(mac, oui, net=None, role="", is_flood=False, is_pwn=False):
+    """One-line 'Vendor · guess/badge · phy' identity for the hunt header (or '')."""
+    vend = "rnd-MAC" if device_id.is_randomized(mac) else \
+        device_id.short_vendor(device_id.vendor_for(mac, oui))
+    guess = device_or_badge(mac, oui, net, role, is_flood, is_pwn)
+    if guess == "·":
+        guess = ""
+    phy = phy_cell(net)
+    seen, out = set(), []
+    for p in (vend, guess, phy):
+        if p and p not in seen:
+            out.append(p)
+            seen.add(p)
+    return " · ".join(out)
+
+
 def resolve_target(t, f2c):
     """Map a selection-screen target dict to (display_filter, label, freq, chan)."""
     freq = t["freq"]
     chan = f2c.get(freq, 0)
     band = fmt_ghz(freq)
+    ident = t.get("ident", "")
+    who = f" [{ident}]" if ident else ""
     tail = f"(ch{chan} · {band})"
     if t["kind"] == "net":
         dfilter, lbl = build_target_filter(bssids=t["bssids"])
-        label = f"{lbl}  {tail}"
+        label = f"{lbl}{who}  {tail}"
     elif t["kind"] == "flood_src":
         dfilter, _ = build_target_filter(sa=t["src"])
-        label = f"deauth src {t['src']}  {tail}"
+        label = f"deauth src {t['src']}{who}  {tail}"
     elif t["kind"] == "flood_all":
         dfilter = f"wlan.fc.type_subtype=={DEAUTH}"
         label = f"ALL deauths  {tail}"
     elif t["kind"] == "mac":
         dfilter, _ = build_target_filter(sa=t["mac"])
-        label = f"MAC {t['mac']}  {tail}"
+        label = f"MAC {t['mac']}{who}  {tail}"
     else:
         raise ValueError(f"unknown target kind {t['kind']!r}")
     return dfilter, label, freq, chan
@@ -202,12 +328,13 @@ def resolve_target(t, f2c):
 # Tri-mode selection screen
 # ==========================================================================
 
-MODE_NET, MODE_FLOOD, MODE_MAC = 0, 1, 2
-MODE_NAMES = ["NETWORKS", "DEAUTH FLOODS", "TRACK MAC"]
+MODE_NET, MODE_FLOOD, MODE_PROBE, MODE_MAC = 0, 1, 2, 3
+MODE_NAMES = ["NETWORKS", "DEAUTH FLOODS", "PROBE CLIENTS", "TRACK MAC"]
+N_MODES = len(MODE_NAMES)
 MAC_CHARS = set("0123456789abcdefABCDEF:")
 
 
-def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
+def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
     """Returns a target dict (see resolve_target) or None if the user quit."""
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -216,7 +343,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
     agg = Aggregator(flood_window=args.flood_window)
 
     mode = MODE_NET
-    cur_net = cur_flood = 0
+    cur_net = cur_flood = cur_probe = 0
     selected = set()
     mac_input = ""
     mac_error = ""
@@ -232,7 +359,8 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
 
         # auto-locate: as soon as the typed MAC is heard, hunt it
         if locating and locating in agg.seen_ch:
-            return {"kind": "mac", "mac": locating, "freq": agg.seen_ch[locating]}
+            return {"kind": "mac", "mac": locating, "freq": agg.seen_ch[locating],
+                    "ident": identity_str(locating, oui)}
 
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -257,15 +385,18 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
             cur_net = max(0, min(cur_net, len(rows) - 1)) if rows else 0
             stdscr.addnstr(3, 0, "UP/DOWN move  SPACE select  ENTER hunt  "
                            f"({len(selected)} selected)", w - 1, curses.A_DIM)
-            hdr = (f"  {'SSID':<20} {'BSSID':<18} {'ch':>3} {'GHz':>6} "
-                   f"{'RSSI':>5} {'enc':>4} {'seen':>5}")
+            hdr = (f"  {'SSID':<16} {'BSSID':<17} {'ch':>3} {'GHz':>6} "
+                   f"{'RSSI':>5} {'enc':>4} {'VENDOR':<12} {'DEVICE':<14} "
+                   f"{'seen':>5}")
             stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
             _draw_list(stdscr, 5, h - 6, rows, cur_net,
                        lambda r: (f"[{'x' if r['bssid'] in selected else ' '}] "
-                                  f"{ssid_display(r):<20.20} {r['bssid']:<18} "
+                                  f"{ssid_display(r):<16.16} {r['bssid']:<17} "
                                   f"{f2c.get(r['freq'],'?'):>3} {fmt_ghz(r['freq']):>6} "
                                   f"{r['rssi']:>5} "
                                   f"{'wpa' if r['priv']=='1' else 'open':>4} "
+                                  f"{vendor_cell(r['bssid'], oui):<12.12} "
+                                  f"{device_or_badge(r['bssid'], oui, r, role='ap', is_pwn=r.get('pwn', False)):<14.14} "
                                   f"{r['count']:>5}"),
                        dim=lambda r: r["hidden"], w=w)
 
@@ -275,21 +406,46 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
             stdscr.addnstr(3, 0, "UP/DOWN move  ENTER hunt  "
                            "(⚑ = flood; 'all' row tracks every deauth on that ch)",
                            w - 1, curses.A_DIM)
-            hdr = (f"    {'GHz':>6} {'ch':>3}  {'source':<18} {'d/s':>6} {'RSSI':>5}")
+            hdr = (f"    {'GHz':>6} {'ch':>3}  {'source':<17} "
+                   f"{'VENDOR':<12} {'DEVICE':<14} {'d/s':>6} {'RSSI':>5}")
             stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
 
             def flood_line(r):
                 flag = "⚑" if r["flood"] else " "
                 if r["kind"] == "all":
-                    who = "ALL deauths on ch"
+                    who, vend, dev = "ALL deauths on ch", "", ""
                     rssi = "   -"
                 else:
                     who = r["src"]
+                    vend = vendor_cell(r["src"], oui)
+                    dev = device_or_badge(r["src"], oui, role="attacker",
+                                          is_flood=r["flood"])
                     rssi = f"{r['rssi']:>5}" if r["rssi"] is not None else "   -"
                 return (f"{flag} {fmt_ghz(r['freq']):>6} {f2c.get(r['freq'],'?'):>3}  "
-                        f"{who:<18.18} {r['rate']:>6.1f} {rssi:>5}")
+                        f"{who:<17.17} {vend:<12.12} {dev:<14.14} "
+                        f"{r['rate']:>6.1f} {rssi:>5}")
             _draw_list(stdscr, 5, h - 6, rows, cur_flood, flood_line,
                        dim=lambda r: not r["flood"], w=w)
+
+        elif mode == MODE_PROBE:
+            rows = agg.client_rows()
+            cur_probe = max(0, min(cur_probe, len(rows) - 1)) if rows else 0
+            stdscr.addnstr(3, 0, "UP/DOWN move  ENTER hunt this client  "
+                           "(PROBES = networks it's looking for)",
+                           w - 1, curses.A_DIM)
+            hdr = (f"  {'CLIENT MAC':<17} {'GHz':>6} {'RSSI':>5} "
+                   f"{'VENDOR':<12} {'PHY':<11} {'#':>4}  "
+                   f"{'PROBES (searched-for SSIDs)'}")
+            stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
+
+            def client_line(r):
+                probes = ", ".join(sorted(r["ssids"])) if r["ssids"] else "—"
+                return (f"  {r['mac']:<17} {fmt_ghz(r['freq']):>6} {r['rssi']:>5} "
+                        f"{vendor_cell(r['mac'], oui):<12.12} "
+                        f"{(phy_cell(r) or '—'):<11.11} {r['count']:>4}  "
+                        f"{probes}")
+            _draw_list(stdscr, 5, h - 6, rows, cur_probe, client_line,
+                       dim=lambda r: not r["ssids"], w=w)
 
         else:  # MODE_MAC
             if locating:
@@ -330,14 +486,15 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
                 if not valid_mac(m):
                     mac_error = f"not a valid MAC: {mac_input!r}"
                 elif m in agg.seen_ch:
-                    return {"kind": "mac", "mac": m, "freq": agg.seen_ch[m]}
+                    return {"kind": "mac", "mac": m, "freq": agg.seen_ch[m],
+                            "ident": identity_str(m, oui)}
                 else:
                     locating = m
                     mac_error = ""
             elif c in (curses.KEY_BACKSPACE, 127, 8):
                 mac_input = mac_input[:-1]
             elif c == ord("S") or c == ord("s"):
-                mode = (mode + 1) % 3
+                mode = (mode + 1) % N_MODES
             elif 0 <= c < 256 and chr(c) in MAC_CHARS:
                 if len(mac_input) < 17:
                     mac_input += chr(c)
@@ -346,17 +503,21 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
         if c in (ord("q"), 27):
             return None
         if c in (ord("S"), ord("s")):
-            mode = (mode + 1) % 3
+            mode = (mode + 1) % N_MODES
         elif c in (curses.KEY_DOWN, ord("j")):
             if mode == MODE_NET:
                 cur_net += 1
             elif mode == MODE_FLOOD:
                 cur_flood += 1
+            elif mode == MODE_PROBE:
+                cur_probe += 1
         elif c in (curses.KEY_UP, ord("k")):
             if mode == MODE_NET:
                 cur_net = max(0, cur_net - 1)
             elif mode == MODE_FLOOD:
                 cur_flood = max(0, cur_flood - 1)
+            elif mode == MODE_PROBE:
+                cur_probe = max(0, cur_probe - 1)
         elif c == ord(" ") and mode == MODE_NET:
             rows = agg.network_rows()
             if rows:
@@ -369,9 +530,13 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
                 targets = selected or {rows[cur_net]["bssid"]}
                 chosen = [r for r in rows if r["bssid"] in targets]
                 chosen.sort(key=lambda r: r["rssi"], reverse=True)
+                strongest = chosen[0]
                 return {"kind": "net",
                         "bssids": {r["bssid"] for r in chosen},
-                        "freq": chosen[0]["freq"]}
+                        "freq": strongest["freq"],
+                        "ident": identity_str(strongest["bssid"], oui,
+                                              strongest, role="ap",
+                                              is_pwn=strongest.get("pwn", False))}
             elif mode == MODE_FLOOD:
                 rows = agg.flood_rows(now, args.rate)
                 if not rows:
@@ -379,7 +544,16 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, args):
                 r = rows[cur_flood]
                 if r["kind"] == "all":
                     return {"kind": "flood_all", "freq": r["freq"]}
-                return {"kind": "flood_src", "src": r["src"], "freq": r["freq"]}
+                return {"kind": "flood_src", "src": r["src"], "freq": r["freq"],
+                        "ident": identity_str(r["src"], oui, role="attacker",
+                                              is_flood=r["flood"])}
+            elif mode == MODE_PROBE:
+                rows = agg.client_rows()
+                if not rows:
+                    continue
+                r = rows[cur_probe]
+                return {"kind": "mac", "mac": r["mac"], "freq": r["freq"],
+                        "ident": identity_str(r["mac"], oui, net=r, role="client")}
 
 
 def _draw_list(stdscr, top, maxrows, rows, cursor, line_fn, dim, w):
@@ -463,6 +637,12 @@ def main():
     f2c = freq_to_chan_map(chans)
     txguard = TxGuard(iface)
 
+    # One-time OUI load for vendor/device identification (empty map if absent).
+    oui = device_id.load_oui()
+    if not oui:
+        print("! no IEEE OUI database found (install 'ieee-data' for vendor "
+              "names); VENDOR/DEVICE columns will be sparse.", file=sys.stderr)
+
     # Top-level loop: scan+select, hunt, return to scan.
     while True:
         cap = CaptureThread(iface, COMBINED_FILTER, COMBINED_FIELDS, parse_combined)
@@ -470,7 +650,7 @@ def main():
         cap.start()
         hopper.start()
         try:
-            target = curses.wrapper(select_screen, iface, cap, hopper, f2c, txguard, args)
+            target = curses.wrapper(select_screen, iface, cap, hopper, f2c, txguard, oui, args)
         finally:
             hopper.stop()
             cap.stop()
