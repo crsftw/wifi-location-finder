@@ -169,3 +169,54 @@ def test_identity_str_includes_phy():
     net = agg.networks["b8:27:eb:11:22:33"]
     ident = sniffer.identity_str(net["bssid"], OUI, net, role="ap")
     assert ident == "Raspberry Pi · n·2.4G·1ss"
+
+
+# ---- multi-BSSID collapse: device_rows() ----
+
+def test_device_rows_collapses_shared_radio_block():
+    # one Cisco radio, 3 BSSIDs sharing the first five octets, 3 SSIDs
+    agg = feed([
+        line(8, "b8:11:4b:fc:f6:80", "b8:11:4b:fc:f6:80", 5320, sig="-66",
+             ht="0x09ad", vht="0x0f81", rx8="0xff", ssid="4e6574"),        # 'Net'
+        line(8, "b8:11:4b:fc:f6:81", "b8:11:4b:fc:f6:81", 5320, sig="-60",
+             ssid="4775657374"),                                           # 'Guest'
+        line(8, "b8:11:4b:fc:f6:82", "b8:11:4b:fc:f6:82", 5320, sig="-70",
+             ssid="496f54"),                                               # 'IoT'
+    ])
+    devs = agg.device_rows()
+    assert len(devs) == 1
+    dv = devs[0]
+    assert dv["base"] == "b8:11:4b:fc:f6"
+    assert dv["bssids"] == {"b8:11:4b:fc:f6:80", "b8:11:4b:fc:f6:81",
+                            "b8:11:4b:fc:f6:82"}
+    assert dv["n_bssids"] == 3
+    assert dv["ssids"] == {"Net", "Guest", "IoT"}
+    assert dv["rssi"] == -60          # strongest member
+    assert dv["count"] == 3
+    # capability presence propagates from whichever member advertised it
+    assert dv["has_vht"] and sniffer.phy_cell(dv) == "ac·5G·2ss"
+
+
+def test_device_rows_keeps_separate_radios_apart():
+    agg = feed([
+        line(8, "b8:11:4b:fc:f6:80", "b8:11:4b:fc:f6:80", 5320, ssid="4e6574"),
+        line(8, "f8:6b:d9:49:79:a0", "f8:6b:d9:49:79:a0", 2437, ssid="4f74686572"),
+    ])
+    devs = agg.device_rows()
+    assert len(devs) == 2
+    assert {d_["base"] for d_ in devs} == {"b8:11:4b:fc:f6", "f8:6b:d9:49:79"}
+
+
+def test_device_rows_sorted_by_rssi_desc():
+    agg = feed([
+        line(8, "aa:aa:aa:aa:aa:01", "aa:aa:aa:aa:aa:01", 2437, sig="-80", ssid="41"),
+        line(8, "bb:bb:bb:bb:bb:01", "bb:bb:bb:bb:bb:01", 2437, sig="-40", ssid="42"),
+    ])
+    assert [d_["base"] for d_ in agg.device_rows()] == ["bb:bb:bb:bb:bb",
+                                                        "aa:aa:aa:aa:aa"]
+
+
+def test_device_row_flags_pwnagotchi_member():
+    agg = feed([line(8, "aa:bb:cc:dd:ee:ff", device_id.PWNAGOTCHI_BSSID, 2437)])
+    dv = agg.device_rows()[0]
+    assert dv["pwn"] is True
