@@ -238,6 +238,54 @@ def device_guess(mac, oui, wps_name="", wps_model="", wps_manuf="", frame_role="
     return ""
 
 
+def _as_int(v):
+    """A tshark hex/dec field to int, 0 when empty/None/unparseable."""
+    if v in (None, ""):
+        return 0
+    try:
+        s = str(v).split(",")[0].strip()
+        return int(s, 0) if s.lower().startswith("0x") else int(s)
+    except ValueError:
+        return 0
+
+
+def spatial_streams(rx_8to15, rx_16to23):
+    """Spatial-stream count from the HT MCS Rx bitmask (1, 2, or 3-for-3+).
+
+    802.11n MCS indices map to streams in groups of 8: 0-7 = 1 stream,
+    8-15 = 2, 16-23 = 3. A nonzero higher group means the radio supports that
+    many streams. We report up to 3 (3 means 3-or-more); most targets are 1-2.
+    """
+    if _as_int(rx_16to23):
+        return 3
+    if _as_int(rx_8to15):
+        return 2
+    return 1
+
+
+def _band_str(freq):
+    if not freq:
+        return ""
+    return "2.4G" if freq < 3000 else "5G"
+
+
+def phy_fingerprint(freq, has_ht, has_vht, has_he, streams=1):
+    """A compact PHY-capability fingerprint, or '' if no capability IEs seen.
+
+    Feature slice 6 - a coarse device *class* from robust presence signals:
+    generation (HE->ax, VHT->ac, HT->n), band (from freq), and spatial streams.
+    e.g. 'n·2.4G·1ss' (the Pi-Zero-W / ESP class), 'ac·5G·2ss', 'ax·5G·2ss'.
+    Returns '' when none of HT/VHT/HE were present, rather than claiming a
+    'legacy' device we didn't actually confirm.
+    """
+    if not (has_ht or has_vht or has_he):
+        return ""
+    gen = "ax" if has_he else "ac" if has_vht else "n"
+    band = _band_str(freq)
+    parts = [gen, band, f"{streams}ss"]
+    return "·".join(p for p in parts if p)
+
+
 def deauther_badge(mac, oui, is_flood, is_pwn_beacon=False):
     """A threat badge for a transmitter, or '' if it looks benign.
 
