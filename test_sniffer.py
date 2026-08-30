@@ -77,3 +77,58 @@ def test_low_rate_deauth_not_badged_as_flood():
     dev = sniffer.device_or_badge(src, OUI, role="attacker",
                                   is_flood=rows[0]["flood"])
     assert dev == "Raspberry Pi"  # device_guess maker hint, not a threat badge
+
+
+# ---- feature 5: probe-request client view ----
+
+def probe(sa, freq, ssid_hex="", sig="-60"):
+    """A probe-request line (subtype 4): client sa, broadcast bssid, probed ssid."""
+    return line(4, sa, "ff:ff:ff:ff:ff:ff", freq, sig=sig, ssid=ssid_hex)
+
+
+def test_probe_request_builds_client_record():
+    agg = feed([probe("d8:3a:dd:aa:bb:cc", 2437, "4d794e6574")])  # 'MyNet'
+    assert "d8:3a:dd:aa:bb:cc" in agg.clients
+    c = agg.clients["d8:3a:dd:aa:bb:cc"]
+    assert c["freq"] == 2437
+    assert c["ssids"] == {"MyNet"}
+    assert c["count"] == 1
+
+
+def test_probe_requests_accumulate_ssids_and_count():
+    sa = "d8:3a:dd:aa:bb:cc"
+    agg = feed([probe(sa, 2437, "4d794e6574"),      # MyNet
+                probe(sa, 2437, "436166655f4749"),  # Cafe_GI
+                probe(sa, 2437, "")])               # wildcard - no ssid
+    c = agg.clients[sa]
+    assert c["ssids"] == {"MyNet", "Cafe_GI"}
+    assert c["count"] == 3
+
+
+def test_probe_wildcard_only_client_has_empty_ssid_set():
+    sa = "1c:2a:3b:aa:bb:cc"
+    agg = feed([probe(sa, 5320), probe(sa, 5320)])
+    c = agg.clients[sa]
+    assert c["ssids"] == set()
+    assert c["count"] == 2
+
+
+def test_client_rows_sorted_by_rssi_desc():
+    agg = feed([probe("1c:2a:3b:00:00:01", 2437, sig="-70"),
+                probe("1c:2a:3b:00:00:02", 2437, sig="-40"),
+                probe("1c:2a:3b:00:00:03", 2437, sig="-55")])
+    rows = agg.client_rows()
+    assert [r["mac"] for r in rows] == ["1c:2a:3b:00:00:02",
+                                        "1c:2a:3b:00:00:03",
+                                        "1c:2a:3b:00:00:01"]
+
+
+def test_probe_requests_do_not_pollute_networks():
+    agg = feed([probe("d8:3a:dd:aa:bb:cc", 2437, "4d794e6574")])
+    assert agg.networks == {}
+
+
+def test_randomized_client_vendor_flag():
+    # 0xda first octet -> locally administered (randomized)
+    agg = feed([probe("da:11:22:33:44:55", 2437, "4d794e6574")])
+    assert sniffer.vendor_cell("da:11:22:33:44:55", OUI) == "rnd"

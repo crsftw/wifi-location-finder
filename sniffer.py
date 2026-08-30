@@ -3,14 +3,16 @@
 sniffer.py - all-in-one WiFi direction finder: pick a network, a deauth flood,
 or a specific MAC, then walk down its transmitter with the RSSI meter.
 
-Built on router_hunt.py. One selection screen with three modes you cycle with
+Built on router_hunt.py. One selection screen with four modes you cycle with
 the S key:
 
   1. NETWORKS      - every AP heard (hidden ones included), like router_hunt.
   2. DEAUTH FLOODS - channels under a deauthentication flood, ranked by rate,
                      with a "all deauths on ch N" row for spoofed/randomised
                      sources.
-  3. TRACK MAC     - type a MAC; it is auto-located by channel-hopping, then
+  3. PROBE CLIENTS - client devices heard probing, with the named networks each
+                     is searching for (its saved-network list).
+  4. TRACK MAC     - type a MAC; it is auto-located by channel-hopping, then
                      tracked.
 
 Hitting ENTER on any of them drops into the exact same RSSI hunt screen as
@@ -46,12 +48,15 @@ from router_hunt import (CaptureThread, Hopper, hunt, build_target_filter,
 import device_id
 
 DEAUTH = 12
+PROBE_REQ = 4
 
-# One capture feeds all three modes: beacons + probe responses (for networks)
-# and deauthentication frames (for floods / activity), hopping across channels.
+# One capture feeds all four modes: beacons + probe responses (for networks),
+# deauthentication frames (for floods / activity), and probe requests (for the
+# client view), hopping across channels.
 COMBINED_FILTER = (f"wlan.fc.type_subtype=={BEACON} || "
                    f"wlan.fc.type_subtype=={PROBE_RESP} || "
-                   f"wlan.fc.type_subtype=={DEAUTH}")
+                   f"wlan.fc.type_subtype=={DEAUTH} || "
+                   f"wlan.fc.type_subtype=={PROBE_REQ}")
 # SSID is last: it may itself contain the '|' separator, so we rejoin the tail.
 # The three WPS identity fields (cleartext device name/model/manufacturer from
 # WPS-enabled beacons and probe-responses) sit just before it at fixed indices;
@@ -114,6 +119,7 @@ class Aggregator:
         self.chan_ts = {}         # freq -> deque[ts]  (all deauths on channel)
         self.deauth_rssi = {}     # (freq, src) -> last rssi
         self.seen_ch = {}         # mac -> freq last transmitted on
+        self.clients = {}         # client mac -> record (probe-request view)
 
     def add(self, rec, now=None):
         now = time.time() if now is None else now
@@ -130,6 +136,27 @@ class Aggregator:
             self.chan_ts.setdefault(freq, deque()).append(now)
             if rec["rssi"] is not None:
                 self.deauth_rssi[(freq, src)] = rec["rssi"]
+        elif rec["st"] == PROBE_REQ:
+            self._add_client(rec, now)
+
+    def _add_client(self, rec, now):
+        mac = rec["sa"]
+        if not mac or mac == BROADCAST:
+            return
+        c = self.clients.get(mac)
+        if c is None:
+            c = self.clients[mac] = {"mac": mac, "freq": rec["freq"],
+                                     "rssi": rec["rssi"] if rec["rssi"] is not None
+                                     else -99, "ssids": set(), "count": 0,
+                                     "last": now}
+        if rec["freq"]:
+            c["freq"] = rec["freq"]
+        if rec["rssi"] is not None:
+            c["rssi"] = rec["rssi"]
+        if rec["ssid"]:                       # a named (directed) probe
+            c["ssids"].add(rec["ssid"])
+        c["count"] += 1
+        c["last"] = now
 
     def _add_net(self, rec):
         b = rec["bssid"]
@@ -169,6 +196,9 @@ class Aggregator:
 
     def network_rows(self):
         return sorted(self.networks.values(), key=lambda r: r["rssi"], reverse=True)
+
+    def client_rows(self):
+        return sorted(self.clients.values(), key=lambda r: r["rssi"], reverse=True)
 
     def flood_rows(self, now=None, rate_threshold=2.0):
         """Rows for the deauth-flood view: an 'all deauths on ch N' row per
@@ -268,8 +298,9 @@ def resolve_target(t, f2c):
 # Tri-mode selection screen
 # ==========================================================================
 
-MODE_NET, MODE_FLOOD, MODE_MAC = 0, 1, 2
-MODE_NAMES = ["NETWORKS", "DEAUTH FLOODS", "TRACK MAC"]
+MODE_NET, MODE_FLOOD, MODE_PROBE, MODE_MAC = 0, 1, 2, 3
+MODE_NAMES = ["NETWORKS", "DEAUTH FLOODS", "PROBE CLIENTS", "TRACK MAC"]
+N_MODES = len(MODE_NAMES)
 MAC_CHARS = set("0123456789abcdefABCDEF:")
 
 
@@ -282,7 +313,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
     agg = Aggregator(flood_window=args.flood_window)
 
     mode = MODE_NET
-    cur_net = cur_flood = 0
+    cur_net = cur_flood = cur_probe = 0
     selected = set()
     mac_input = ""
     mac_error = ""
@@ -366,6 +397,24 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
             _draw_list(stdscr, 5, h - 6, rows, cur_flood, flood_line,
                        dim=lambda r: not r["flood"], w=w)
 
+        elif mode == MODE_PROBE:
+            rows = agg.client_rows()
+            cur_probe = max(0, min(cur_probe, len(rows) - 1)) if rows else 0
+            stdscr.addnstr(3, 0, "UP/DOWN move  ENTER hunt this client  "
+                           "(PROBES = networks it's looking for)",
+                           w - 1, curses.A_DIM)
+            hdr = (f"  {'CLIENT MAC':<17} {'GHz':>6} {'RSSI':>5} "
+                   f"{'VENDOR':<12} {'#':>4}  {'PROBES (searched-for SSIDs)'}")
+            stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
+
+            def client_line(r):
+                probes = ", ".join(sorted(r["ssids"])) if r["ssids"] else "—"
+                return (f"  {r['mac']:<17} {fmt_ghz(r['freq']):>6} {r['rssi']:>5} "
+                        f"{vendor_cell(r['mac'], oui):<12.12} {r['count']:>4}  "
+                        f"{probes}")
+            _draw_list(stdscr, 5, h - 6, rows, cur_probe, client_line,
+                       dim=lambda r: not r["ssids"], w=w)
+
         else:  # MODE_MAC
             if locating:
                 cl = f"ch{cur[0]} {fmt_ghz(cur[1])}" if cur else "-"
@@ -413,7 +462,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
             elif c in (curses.KEY_BACKSPACE, 127, 8):
                 mac_input = mac_input[:-1]
             elif c == ord("S") or c == ord("s"):
-                mode = (mode + 1) % 3
+                mode = (mode + 1) % N_MODES
             elif 0 <= c < 256 and chr(c) in MAC_CHARS:
                 if len(mac_input) < 17:
                     mac_input += chr(c)
@@ -422,17 +471,21 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
         if c in (ord("q"), 27):
             return None
         if c in (ord("S"), ord("s")):
-            mode = (mode + 1) % 3
+            mode = (mode + 1) % N_MODES
         elif c in (curses.KEY_DOWN, ord("j")):
             if mode == MODE_NET:
                 cur_net += 1
             elif mode == MODE_FLOOD:
                 cur_flood += 1
+            elif mode == MODE_PROBE:
+                cur_probe += 1
         elif c in (curses.KEY_UP, ord("k")):
             if mode == MODE_NET:
                 cur_net = max(0, cur_net - 1)
             elif mode == MODE_FLOOD:
                 cur_flood = max(0, cur_flood - 1)
+            elif mode == MODE_PROBE:
+                cur_probe = max(0, cur_probe - 1)
         elif c == ord(" ") and mode == MODE_NET:
             rows = agg.network_rows()
             if rows:
@@ -462,6 +515,13 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                 return {"kind": "flood_src", "src": r["src"], "freq": r["freq"],
                         "ident": identity_str(r["src"], oui, role="attacker",
                                               is_flood=r["flood"])}
+            elif mode == MODE_PROBE:
+                rows = agg.client_rows()
+                if not rows:
+                    continue
+                r = rows[cur_probe]
+                return {"kind": "mac", "mac": r["mac"], "freq": r["freq"],
+                        "ident": identity_str(r["mac"], oui, role="client")}
 
 
 def _draw_list(stdscr, top, maxrows, rows, cursor, line_fn, dim, w):
