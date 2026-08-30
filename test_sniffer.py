@@ -220,3 +220,27 @@ def test_device_row_flags_pwnagotchi_member():
     agg = feed([line(8, "aa:bb:cc:dd:ee:ff", device_id.PWNAGOTCHI_BSSID, 2437)])
     dv = agg.device_rows()[0]
     assert dv["pwn"] is True
+
+
+# ---- adaptive hopping: per-channel activity snapshot ----
+
+def test_channel_activity_counts_frames_per_freq():
+    agg = feed([
+        line(8, "aa:aa:aa:aa:aa:01", "aa:aa:aa:aa:aa:01", 2437, ssid="41"),
+        line(8, "aa:aa:aa:aa:aa:01", "aa:aa:aa:aa:aa:01", 2437, ssid="41"),
+        line(12, "fe:ff:ff:ff:ff:ff", "b8:11:4b:fc:f6:80", 5320)],
+        now=1000.0)
+    act = agg.channel_activity(now=1000.0, window=5.0)
+    assert act[2437] == 2
+    assert act[5320] == 1
+
+
+def test_channel_activity_windows_out_old_frames():
+    agg = sniffer.Aggregator()
+    agg.add(sniffer.parse_combined(line(8, "aa:aa:aa:aa:aa:01",
+            "aa:aa:aa:aa:aa:01", 2437, ssid="41")), now=1000.0)
+    # a later frame; the old one falls outside a 5s window
+    agg.add(sniffer.parse_combined(line(8, "aa:aa:aa:aa:aa:01",
+            "aa:aa:aa:aa:aa:01", 2437, ssid="41")), now=1008.0)
+    act = agg.channel_activity(now=1008.0, window=5.0)
+    assert act[2437] == 1

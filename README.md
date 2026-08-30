@@ -25,6 +25,15 @@ between four modes; hit **ENTER** on a target and you drop into a shared RSSI
 Every list has a **GHz** column showing whether the target transmits on **2.x**
 or **5.x GHz**.
 
+The scanner uses **adaptive channel hopping** by default (the header shows
+`(adaptive)`): it still visits every channel each sweep, but weights the dwell
+toward activity — a flooded channel gets the most time, an active one the base
+dwell (`--dwell`), a silent one the minimum (`--min-dwell`), and 2.4 GHz
+primaries (1/6/11) stay warm even when quiet. That collapses the many empty
+5 GHz channels and concentrates listening where the devices are, so a typical
+sweep finishes in about half the time and the RSSI stream on a busy channel is
+much denser. Pass **`--no-adaptive`** for plain uniform hopping.
+
 ### Device identification (VENDOR / DEVICE columns)
 
 The scan lists carry these passive-identity columns, and the identity follows you into
