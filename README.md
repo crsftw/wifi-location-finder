@@ -20,7 +20,7 @@ between four modes; hit **ENTER** on a target and you drop into a shared RSSI
 | **NETWORKS** | APs heard, hidden ones as `<hidden>` (SSID, BSSID, ch, **GHz**, RSSI, enc, **VENDOR**, **DEVICE**). Collapsed into **one row per physical device** by default (the 8 BSSIDs of one radio become a single `Guest +7` row); press **`g`** to expand to per-SSID. `SPACE` multi-selects a device (or a BSSID in flat view) | that device's transmitter(s) |
 | **MGMT FLOODS** | channels under a deauth or disassoc flood, ranked by frames/sec, `⚑` = flood, with **TYPE**, **DEVICE**, and **LIKELY SOURCE** — the beaconing radio whose signal matches each spoofed source (`✓` confident · `?` possible · `✗` no AP matches, likely a separate device · `–` no beacons on that channel yet). A spoofed source that is really two radios shows as two rows. An `ALL floods on ch N` row per channel handles everything at once | the attacker's transmitter (or every flood on that channel); the hunt screen then shows the refined attribution with its numbers |
 | **PROBE CLIENTS** | client devices heard probing (phones, laptops, IoT), ranked by RSSI, with **VENDOR**, a **PHY** capability class, and the **PROBES** column — the named networks each client is searching for (its saved-network list, which ties a device to its home/work SSIDs) | that client's transmitter |
-| **TRACK MAC** | a text box — type a MAC | that MAC, **auto-located** by hopping until it's heard, then parked on its channel; if that MAC is currently flooding, its LIKELY SOURCE is shown under the input box |
+| **TRACK MAC** | a text box — type a MAC; if that MAC is currently flooding, its LIKELY SOURCE is shown under the input box | that MAC, **auto-located** by hopping until it's heard, then parked on its channel |
 
 Every list has a **GHz** column showing whether the target transmits on **2.x**
 or **5.x GHz**.
@@ -122,7 +122,7 @@ on a target. `init-hunt.sh` still does the one-time monitor-mode setup.
 
 | Where | Key | Action |
 |---|---|---|
-| Scan screen | `S` | switch mode: NETWORKS → DEAUTH FLOODS → PROBE CLIENTS → TRACK MAC |
+| Scan screen | `S` | switch mode: NETWORKS → MGMT FLOODS → PROBE CLIENTS → TRACK MAC |
 | | `g` | (NETWORKS) toggle device view (one row per radio) ↔ per-SSID |
 | | ↑ / ↓ | move the cursor |
 | | `SPACE` | (NETWORKS) select / deselect the device (or BSSID in per-SSID view) |
@@ -202,8 +202,8 @@ multiple spoofed targets can only come from one radio.
 10–20 dB. This is mounted, plugged in, or sitting on a shelf — it will still be
 there when you arrive.
 
-In `sniffer.py` this shows up in **DEAUTH FLOODS** on channel 64 with source
-`fe:ff:ff:ff:ff:ff`; hit ENTER on it (or on the `ALL deauths on ch 64` row) to
+In `sniffer.py` this shows up in **MGMT FLOODS** on channel 64 with source
+`fe:ff:ff:ff:ff:ff`; hit ENTER on it (or on the `ALL floods on ch 64` row) to
 direction-find it.
 
 ### What the full-band sweeps found
@@ -279,7 +279,7 @@ retunes the receiver with `iw`; retuning is not transmitting.
 
 | File | Purpose |
 |---|---|
-| `sniffer.py` | **All-in-one DF:** networks (collapsed to one row per device) / deauth floods / probe clients / a specific MAC → shared RSSI hunt. Vendor + device + pwnagotchi/deauther badges + PHY class, adaptive channel hopping, and **live flood attribution** |
+| `sniffer.py` | **All-in-one DF:** networks (collapsed to one row per device) / deauth/disassoc floods / probe clients / a specific MAC → shared RSSI hunt. Vendor + device + pwnagotchi/deauther badges + PHY class, adaptive channel hopping, and **live flood attribution** |
 | `device_id.py` | Passive device identification: OUI→vendor, randomized-MAC flag, WPS/role device guess, pwnagotchi/deauther badge, PHY-capability fingerprint (standalone, unit-tested) |
 | `attribution.py` | Which beaconing radio is behind a spoofed-source flood: RSSI clustering, signal-vector match, fading correlation, sequence continuity. Feeds the LIKELY SOURCE column live; `--pcap` runs it over a capture (standalone, unit-tested against real captures) |
 | `deauth_sweep.py` | Sweep every 2.4/5 GHz channel and report **which channel** a deauth flood is on, so you know where to hunt |
