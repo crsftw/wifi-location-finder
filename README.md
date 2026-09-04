@@ -293,10 +293,12 @@ retunes the receiver with `iw`; retuning is not transmitting.
 | `old_scripts/make_test_capture.py` | Synthesises a pcap with the exact signature, for off-site validation |
 
 `sniffer.py` imports the capture, hopping, hunt, audio and colour code from
-`router_hunt.py` / `deauth_hunt.py` / `deauth_sweep.py`, and the vendor/device
-identification from `device_id.py`, so those five `.py` files must stay together
+`router_hunt.py` / `deauth_hunt.py` / `deauth_sweep.py`, the vendor/device
+identification from `device_id.py`, and the flood attribution from
+`attribution.py`, so those six `.py` files must stay together
 in this folder. The pure logic (identification, threat/PHY classification,
-multi-BSSID collapse, adaptive-hop scheduling) is unit-tested — run **`pytest`**
+multi-BSSID collapse, adaptive-hop scheduling, flood attribution) is
+unit-tested — run **`pytest`**
 (`test_device_id.py`, `test_sniffer.py`, `test_hopper.py`, `test_attribution.py`).
 
 ### Which tool when

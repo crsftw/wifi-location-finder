@@ -139,9 +139,9 @@ class Aggregator:
     def __init__(self, flood_window=5.0):
         self.flood_window = flood_window
         self.networks = {}        # bssid -> record
-        self.deauth_ts = {}       # (freq, src) -> deque[ts]
-        self.chan_ts = {}         # freq -> deque[ts]  (all deauths on channel)
-        self.deauth_rssi = {}     # (freq, src) -> last rssi
+        self.deauth_ts = {}       # (freq, src, st) -> deque[ts]
+        self.chan_ts = {}         # freq -> deque[ts]  (all deauth + disassoc frames on channel)
+        self.deauth_rssi = {}     # (freq, src, st) -> last rssi
         self.seen_ch = {}         # mac -> freq last transmitted on
         self.clients = {}         # client mac -> record (probe-request view)
         self.freq_ts = {}         # freq -> deque[ts]  (all frames, for adaptive hopping)

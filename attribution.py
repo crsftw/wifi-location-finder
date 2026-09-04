@@ -16,7 +16,7 @@ the four techniques from the floor-6 offline analysis:
 and turns them into a marked verdict: ✓ confident, ? possible, ✗ no beaconing
 AP matches (a separate device), – no beacons on that channel yet.
 
-Pure logic: stdlib + device_id only. No radio, no curses. `--pcap FILE` runs
+Pure logic: stdlib only. No radio, no curses. `--pcap FILE` runs
 the same engine over a capture (tshark -r), which is how it is validated.
 """
 

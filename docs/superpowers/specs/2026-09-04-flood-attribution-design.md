@@ -100,6 +100,9 @@ implementation: the channel-108 ground-truth margin is 1.12 dB, and the
 sibling-track collapse that the radio-key fix removed was ~0.02 dB, so 1.0
 keeps the same discrimination without sitting on the boundary.
 
+A sole candidate on the channel has no runner-up; `margin` is then `None`
+and the margin test passes by default (displayed as `only AP on ch`).
+
 `✗` is a first-class finding, not a failure: "no beaconing AP within 6 dB of
 this signal" is exactly the evidence that would point at a hidden device, so the
 column distinguishes infrastructure containment from a rogue transmitter.
@@ -170,8 +173,8 @@ change; no new external command, no `iw` call, nothing on the TX path.
 
 ### TRACK MAC
 
-When the typed MAC is currently a flood source, the status line (row 3) shows
-the same attribution string. Otherwise unchanged.
+When the typed MAC is currently a flood source, up to three lines under the
+input box (rows 9–11) show the same attribution string. Otherwise unchanged.
 
 ### Hunt screen
 
