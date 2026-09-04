@@ -12,10 +12,10 @@ OUI = device_id.load_oui()
 
 def line(st, sa, bssid, freq, sig="-50", priv="0",
          ht="", vht="", he="", rx8="", rx16="",
-         wn="", wm="", wf="", ssid=""):
-    """Build one COMBINED_FIELDS pipe-line (16 fixed fields + ssid tail)."""
+         wn="", wm="", wf="", ssid="", ts="", seq=""):
+    """Build one COMBINED_FIELDS pipe-line (18 fixed fields + ssid tail)."""
     return "|".join([str(st), sa, sa, "ff:ff:ff:ff:ff:ff", bssid, str(freq),
-                     sig, priv, ht, vht, he, rx8, rx16, wn, wm, wf, ssid])
+                     sig, priv, ht, vht, he, rx8, rx16, wn, wm, wf, ts, seq, ssid])
 
 
 def feed(lines, now=1000.0, flood_window=5.0):
@@ -244,3 +244,25 @@ def test_channel_activity_windows_out_old_frames():
             "aa:aa:aa:aa:aa:01", 2437, ssid="41")), now=1008.0)
     act = agg.channel_activity(now=1008.0, window=5.0)
     assert act[2437] == 1
+
+
+# ---- capture fields for attribution ----
+
+def test_parse_combined_keeps_chains_ts_and_seq():
+    rec = sniffer.parse_combined(line(12, "ff:ff:ff:ff:ff:ff", "02:00:5e:00:01:8c", 5540,
+                                      sig="-59,-62,-61", ts="1756000000.25", seq="686"))
+    assert rec["rssi"] == -59
+    assert rec["chains"] == [-59, -62, -61]
+    assert rec["ts"] == 1756000000.25
+    assert rec["seq"] == 686
+
+
+def test_parse_combined_missing_ts_and_seq_are_none():
+    rec = sniffer.parse_combined(line(8, "02:00:5e:00:01:80", "02:00:5e:00:01:80", 2437))
+    assert rec["chains"] == [-50] and rec["ts"] is None and rec["seq"] is None
+
+
+def test_combined_capture_includes_disassoc_and_new_fields():
+    assert "wlan.fc.type_subtype==10" in sniffer.COMBINED_FILTER
+    assert sniffer.COMBINED_FIELDS[-3:] == ["frame.time_epoch", "wlan.seq", "wlan.ssid"]
+    assert sniffer._N_FIXED == len(sniffer.COMBINED_FIELDS) - 1

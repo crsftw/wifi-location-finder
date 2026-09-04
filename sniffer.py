@@ -47,8 +47,10 @@ from router_hunt import (CaptureThread, Hopper, hunt, build_target_filter,
                          ssid_display, first_int, directional_reminder,
                          parse_hunt, HUNT_FIELDS, BEACON, PROBE_RESP, Beeper)
 import device_id
+import attribution
 
 DEAUTH = 12
+DISASSOC = 10
 PROBE_REQ = 4
 
 # One capture feeds all four modes: beacons + probe responses (for networks),
@@ -57,11 +59,13 @@ PROBE_REQ = 4
 COMBINED_FILTER = (f"wlan.fc.type_subtype=={BEACON} || "
                    f"wlan.fc.type_subtype=={PROBE_RESP} || "
                    f"wlan.fc.type_subtype=={DEAUTH} || "
+                   f"wlan.fc.type_subtype=={DISASSOC} || "
                    f"wlan.fc.type_subtype=={PROBE_REQ}")
 # SSID is last: it may itself contain the '|' separator, so we rejoin the tail.
 # The three WPS identity fields (cleartext device name/model/manufacturer from
-# WPS-enabled beacons and probe-responses) sit just before it at fixed indices;
-# they are controlled device strings and in practice never contain a '|'.
+# WPS-enabled beacons and probe-responses) sit at fixed indices; they are
+# controlled device strings and in practice never contain a '|'. The frame
+# timestamp and sequence number feed flood attribution (attribution.py).
 COMBINED_FIELDS = ["wlan.fc.type_subtype", "wlan.sa", "wlan.ta", "wlan.da",
                    "wlan.bssid", "radiotap.channel.freq",
                    "radiotap.dbm_antsignal", "wlan.fixed.capabilities.privacy",
@@ -72,8 +76,9 @@ COMBINED_FIELDS = ["wlan.fc.type_subtype", "wlan.sa", "wlan.ta", "wlan.da",
                    "wlan.ext_tag.he_mac_caps", "wlan.ht.mcsset.rxbitmask.8to15",
                    "wlan.ht.mcsset.rxbitmask.16to23",
                    "wps.device_name", "wps.model_name", "wps.manufacturer",
+                   "frame.time_epoch", "wlan.seq",
                    "wlan.ssid"]
-_N_FIXED = 16  # fields before the (possibly '|'-containing) SSID tail
+_N_FIXED = 18  # fields before the (possibly '|'-containing) SSID tail
 
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 
@@ -96,8 +101,12 @@ def parse_combined(line):
         return None
     (st, sa, ta, da, bssid, freq, sig, priv,
      ht, vht, he, rx8, rx16,
-     wps_name, wps_model, wps_manuf) = parts[:_N_FIXED]
+     wps_name, wps_model, wps_manuf, ts, seq) = parts[:_N_FIXED]
     ssid = decode_ssid("|".join(parts[_N_FIXED:]))
+    try:
+        ts = float(ts)
+    except ValueError:
+        ts = None
     return {
         "st": first_int(st),
         "sa": _first(sa).lower(),
@@ -106,6 +115,9 @@ def parse_combined(line):
         "bssid": _first(bssid).lower(),
         "freq": first_int(freq),
         "rssi": first_int(sig),
+        "chains": attribution.parse_chains(sig),   # combined first, then per RX chain
+        "ts": ts,
+        "seq": first_int(seq),
         "priv": norm_priv(priv),
         "has_ht": bool(_first(ht)),
         "has_vht": bool(_first(vht)),
