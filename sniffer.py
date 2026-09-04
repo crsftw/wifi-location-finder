@@ -575,7 +575,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                     mark = ("x" if r["bssids"] <= selected
                             else "~" if r["bssids"] & selected else " ")
                     b = r["strong_bssid"]
-                    return (f"[{mark}] {name:<16.16} {r['base'] + ':**':<17} "
+                    return (f"[{mark}] {name:<16.16} {b:<17} "
                             f"{f2c.get(r['freq'],'?'):>3} {fmt_ghz(r['freq']):>6} "
                             f"{r['rssi']:>5} "
                             f"{'wpa' if r['priv']=='1' else 'open':>4} "
