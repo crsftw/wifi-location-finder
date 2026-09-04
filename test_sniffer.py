@@ -319,6 +319,19 @@ def test_real_source_deauth_is_not_attributed():
     assert agg.tracks.source(2437, "02:00:5e:00:01:c0", 12) == []
 
 
+def test_real_ap_deauth_before_its_beacon_is_not_attributed():
+    # the hopper lands mid-burst: this AP's deauths arrive before its next
+    # beacon, so they are first recorded as a spoofed-source flood - once
+    # the beacon lands the AP must be forgotten as a source, not attributed
+    # to its own radio
+    ls = [_flood("02:00:5e:00:01:c0", 2437, "-50", 1000 + i * 0.1, i) for i in range(5)]
+    ls.append(_beacon("02:00:5e:00:01:c0", 2437, "-50", "436f7270", 1000.6))
+    agg = feed(ls, now=1001.0)
+    assert agg.tracks.source(2437, "02:00:5e:00:01:c0", 12) == []
+    rows = [r for r in agg.flood_rows(now=1001.0) if r["kind"] == "src"]
+    assert len(rows) == 1 and rows[0]["attrib"] is None
+
+
 def test_two_rssi_clusters_from_one_spoofed_source_are_two_rows():
     ls = []
     for i in range(40):

@@ -92,6 +92,19 @@ def test_radio_name_hidden_when_no_ssid_seen():
     assert t.radios_on(2437)[0].name() == "<hidden>"
 
 
+def test_add_radio_forgets_a_source_that_turns_out_to_beacon():
+    t = A.Tracks()
+    for i in range(5):
+        t.add_source(5540, "02:00:5e:00:07:70", A.DEAUTH,
+                     A.Sample(float(i), -60, None, None, i))
+    t.add_radio(5540, "02:00:5e:00:07:70", "Corp", A.Sample(10.0, -60, -62, -61, None))
+    assert t.source_keys(5540) == []
+    # a different spoofed source on the channel survives
+    t.add_source(5540, "fe:ff:ff:ff:ff:ff", A.DEAUTH, A.Sample(11.0, -70, None, None, 0))
+    t.add_radio(5540, "02:00:5e:00:07:70", "Corp", A.Sample(12.0, -60, -62, -61, None))
+    assert t.source_keys(5540) == [(5540, "fe:ff:ff:ff:ff:ff", A.DEAUTH)]
+
+
 # ---- 1. clustering ----
 
 def _s(combined, ts=0.0, a=None, b=None, seq=None):
@@ -117,9 +130,33 @@ def test_cluster_two_groups_3db_apart_stay_together():
 
 
 def test_cluster_sparse_tail_does_not_split():
-    # 5 stray frames at -75 are <10% of the -60 peak: not a second radio
-    samples = [_s(-60) for _ in range(100)] + [_s(-75) for _ in range(5)]
+    # 5 stray frames spread just below the peak, one to a bin, are each
+    # <10% of the -60 peak: inside the cluster's own spread, not a second
+    # radio - the tail is absorbed, not split.
+    samples = ([_s(-60) for _ in range(100)]
+               + [_s(db) for db in (-62, -63, -64, -65, -66)])
     assert len(A.cluster(samples)) == 1
+
+
+def test_cluster_weak_second_radio_across_an_empty_gap_splits():
+    # 30 dB apart, empty in between: >= VALLEY_DB empty bins always cut,
+    # even though the second radio's 50 frames are far under 10% of 1000
+    samples = [_s(-40) for _ in range(1000)] + [_s(-70) for _ in range(50)]
+    cl = A.cluster(samples)
+    assert len(cl) == 2
+    assert len(cl[0]) == 1000 and all(s.combined == -40 for s in cl[0])
+    assert len(cl[1]) == 50 and all(s.combined == -70 for s in cl[1])
+
+
+def test_cluster_sparse_valley_still_needs_fraction_rule():
+    # a non-empty (but sparse) 5-bin valley, then a substantial far group:
+    # the fraction rule still cuts when the far side is >= 10% of the peak
+    samples = ([_s(-60) for _ in range(100)]
+               + [_s(db) for db in (-63, -64, -65, -66, -67)]
+               + [_s(-70) for _ in range(30)])
+    cl = A.cluster(samples)
+    assert len(cl) == 2
+    assert len(cl[0]) == 105 and len(cl[1]) == 30
 
 
 def test_cluster_empty():
@@ -174,6 +211,24 @@ def test_match_flags_one_chain_when_either_side_lacks_chains():
 def test_match_skips_radios_with_no_samples():
     empty = A.RadioTrack("02:00:5e:00:09:0")
     assert A.match([_s(-60)], [empty]) == []
+
+
+def test_match_uses_one_dimensionality_for_every_candidate():
+    # radio Y has one sample with no chains, so _vec(Y) drops to 1-D; the
+    # old per-pair n = min(len(cv), len(rv)) let Y win on a 1-D distance
+    # while X was judged on the full 3-D distance - apples to oranges.
+    # Every candidate must be compared at the same dimensionality.
+    cl = [_s(-60, a=-63, b=-62)]
+    rx = _radio("02:00:5e:00:01:c", -60, -57, -67)         # 3-D dist ~7.8
+    ry = A.RadioTrack("02:00:5e:00:02:a")
+    for i in range(19):
+        ry.samples.append(A.Sample(float(i), -60.5, -63, -62, None))
+    ry.samples.append(A.Sample(19.0, -60.5, None, None, None))  # breaks the chain vector
+    cands = A.match(cl, [rx, ry])
+    assert [c.radio.key for c in cands] == [rx.key, ry.key]
+    assert cands[0].dist == pytest.approx(0.0)
+    assert cands[1].dist == pytest.approx(0.5)
+    assert all(c.one_chain for c in cands)
 
 
 # ---- 3. fading correlation ----
@@ -452,6 +507,12 @@ def test_hunt_line_na():
 
 
 # ---- 7. offline ----
+
+def test_decode_ssid_multi_value_beacon_decodes_the_first_token():
+    assert A._decode_ssid("436f7270,4775657374") == "Corp"
+    assert A._decode_ssid("a,b") == "a,b"                # odd-length tokens: not hex SSIDs
+    assert A._decode_ssid("436f7270") == "Corp"
+
 
 def test_parse_pcap_line_fields_and_hex_ssid():
     line = "|".join(["1756000000.5", "0x0008", "02:00:5e:00:01:c0", "02:00:5e:00:01:c0",

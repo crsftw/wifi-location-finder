@@ -147,15 +147,30 @@ class Tracks:
         key = radio_key(bssid)
         if key is None:
             return
+        bssid = bssid.lower()
         r = self.radios.get((freq, key))
         if r is None:
             r = self.radios[(freq, key)] = RadioTrack(key)
         r.samples.append(sample)
         self._evict(r.samples, sample.ts)
-        r.bssids.add(bssid.lower())
+        r.bssids.add(bssid)
         if ssid:
             r.ssids[ssid] += 1
-        self.bssids.add(bssid.lower())
+        if bssid not in self.bssids:
+            # first time this BSSID is known to beacon: any deauths already
+            # recorded as a spoofed-source flood from it were a real AP
+            # deauthing a client, heard before its own beacon - not spoofed
+            self.bssids.add(bssid)
+            self.forget_source(bssid)
+
+    def forget_source(self, sa):
+        """Drop every 'sources' entry for this address, on every frequency
+        and subtype: it has turned out to be a real beaconing radio, not a
+        spoofed flood source."""
+        sa = sa.lower()
+        for key in list(self.sources):
+            if key[1] == sa:
+                del self.sources[key]
 
     def source(self, freq, sa, subtype):
         return list(self.sources.get((freq, sa, subtype), ()))
@@ -175,8 +190,9 @@ def cluster(samples):
     """Split samples on combined RSSI. Walk a 1 dB histogram from the
     strongest bin down; a run of >= VALLEY_DB bins each holding < VALLEY_FRAC
     of the current cluster's peak, followed by a bin that is not, starts a
-    new cluster. Weak tails under the fraction are absorbed, not split.
-    Returns clusters strongest first."""
+    new cluster. Weak tails inside a cluster's own spread are absorbed; a run
+    of VALLEY_DB empty bins always separates radios. Returns clusters
+    strongest first."""
     if not samples:
         return []
     hist = Counter(int(round(s.combined)) for s in samples)
@@ -184,14 +200,23 @@ def cluster(samples):
     cuts = []            # descending dB values; a cut's bin and below start a new cluster
     peak = 0
     valley = 0
+    empty = 0
     for db in range(hi, lo - 1, -1):
         c = hist.get(db, 0)
-        if c and c >= VALLEY_FRAC * peak:
-            if valley >= VALLEY_DB:
-                cuts.append(db)
-                peak = 0
+        if c == 0:
+            valley += 1
+            empty += 1
+            continue
+        strong = c >= VALLEY_FRAC * peak
+        if empty >= VALLEY_DB or (valley >= VALLEY_DB and strong):
+            cuts.append(db)          # this bin starts the new cluster
+            peak = 0
+            valley = 0
+            empty = 0
+        if strong:
             peak = max(peak, c)
             valley = 0
+            empty = 0
         else:
             valley += 1
     groups = [[] for _ in range(len(cuts) + 1)]
@@ -223,16 +248,23 @@ def _vec(samples):
 def match(cluster, radios):
     """Every radio ranked by Euclidean distance (dB) between the cluster's
     mean vector and the radio's mean beacon vector. Two RX chains give a
-    coarse bearing signature that one combined value cannot."""
+    coarse bearing signature that one combined value cannot.
+
+    All candidates are compared at the same dimensionality (1 or 3): if any
+    one of them - cluster or radio - lacks a full chain vector, every
+    distance uses combined-only, so a radio with one incomplete beacon
+    can't out-compete a true 3-D match on a partial term count."""
     cv = _vec(cluster)
+    valid = [r for r in radios if r.samples]
+    if not valid:
+        return []
+    dims = min(len(cv), *(len(_vec(r.samples)) for r in valid))
+    one_chain = dims == 1
     out = []
-    for r in radios:
-        if not r.samples:
-            continue
+    for r in valid:
         rv = _vec(r.samples)
-        n = min(len(cv), len(rv))
-        d = math.sqrt(sum((cv[i] - rv[i]) ** 2 for i in range(n)))
-        out.append(Candidate(r, d, n == 1))
+        d = math.sqrt(sum((cv[i] - rv[i]) ** 2 for i in range(dims)))
+        out.append(Candidate(r, d, one_chain))
     out.sort(key=lambda c: c.dist)
     return out
 
@@ -432,11 +464,21 @@ def _first_int(v):
     return None
 
 
+_MULTI_SSID_HEX = re.compile(r"^[0-9a-fA-F]+(,[0-9a-fA-F]+)+$")
+
+
 def _decode_ssid(raw):
-    """tshark 4.x emits SSIDs as hex; hidden ones as '<MISSING>' or empty."""
+    """tshark 4.x emits SSIDs as hex; hidden ones as '<MISSING>' or empty.
+    A beacon carrying several wlan.ssid fields (occurrence=a) arrives as
+    'hex,hex,...' - decode the first token when every comma-separated token
+    is even-length hex; a raw SSID that merely contains a comma (old tshark)
+    is left intact."""
     raw = (raw or "").strip()
     if not raw or raw == "<MISSING>":
         return ""
+    if ("," in raw and _MULTI_SSID_HEX.match(raw)
+            and all(len(tok) % 2 == 0 for tok in raw.split(","))):
+        raw = raw.split(",", 1)[0]
     if len(raw) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", raw):
         try:
             return bytes.fromhex(raw).decode("utf-8", "replace").rstrip("\x00")
