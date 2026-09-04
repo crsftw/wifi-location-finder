@@ -2357,6 +2357,8 @@ elsewhere, collapsing the runner-up margin. `device_id.base_mac_key` and
 the NETWORKS view are unchanged.
 ```
 
+Also in the spec, under `### Verdict`: change `margin ≥ 2.0 dB` to `margin ≥ 1.0 dB` in the `✓` row, and `MARGIN_OK=2.0` to `MARGIN_OK=1.0` in the thresholds line; append to that thresholds paragraph the sentence: `MARGIN_OK was lowered from 2.0 during implementation: the channel-108 ground-truth margin is 1.12 dB, and the sibling-track collapse that the radio-key fix removed was ~0.02 dB, so 1.0 keeps the same discrimination without sitting on the boundary.`
+
 - [ ] **Step 6: Check the README renders and the suite is green**
 
 Run: `grep -n '^#\+ ' README.md | sed -n '1,25p' && python3 -m pytest -q`
