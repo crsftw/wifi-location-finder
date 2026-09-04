@@ -359,3 +359,73 @@ def test_attribute_channel_covers_every_source_or_just_one():
     one = A.attribute_channel(5540, t, sa="fe:ff:ff:ff:ff:ff")
     assert len(one) == 1 and one[0].radio.key == "02:00:5e:00:02:a"
     assert A.attribute_channel(2437, t) == []
+
+
+# ---- 6. display ----
+
+def _named_radio(key, ssid, n_bssids=1):
+    r = A.RadioTrack(key)
+    r.ssids[ssid] += 1
+    for i in range(n_bssids):
+        r.bssids.add(f"{key}{i:x}")
+    return r
+
+
+def test_key_tail():
+    assert A.key_tail(A.RadioTrack("02:00:5e:00:0a:c")) == "…00:0a:c*"
+
+
+def test_short_label_ok_shows_name_tail_and_margin():
+    r = _named_radio("02:00:5e:00:01:c", "Corp", 4)
+    a = _attr(marker=A.MARK_OK, radio=r, dist=0.02, margin=1.15)
+    assert A.short_label(a) == "✓ Corp +3 (…00:01:c*)  1.2dB"
+
+
+def test_short_label_ok_only_radio_on_channel():
+    r = _named_radio("02:00:5e:00:01:c", "Corp")
+    a = _attr(marker=A.MARK_OK, radio=r, dist=0.02, margin=None)
+    assert A.short_label(a) == "✓ Corp (…00:01:c*)  only AP on ch"
+
+
+def test_short_label_maybe_has_no_margin():
+    r = _named_radio("02:00:5e:00:01:c", "Corp")
+    a = _attr(marker=A.MARK_MAYBE, radio=r, dist=0.5, margin=0.8)
+    assert A.short_label(a) == "? Corp (…00:01:c*)"
+
+
+def test_short_label_none_and_na():
+    r = _named_radio("02:00:5e:00:01:c", "Corp")
+    assert A.short_label(_attr(marker=A.MARK_NONE, radio=r, dist=9.4)) == \
+        "✗ no AP match — separate device?"
+    assert A.short_label(_attr(marker=A.MARK_NA)) == "–"
+
+
+def test_hunt_line_ok_carries_every_number():
+    r = _named_radio("02:00:5e:00:01:c", "Corp", 4)
+    ru = _named_radio("02:00:5e:00:02:a", "Walkin")
+    a = _attr(marker=A.MARK_OK, radio=r, dist=0.02, margin=1.15, runner_up=ru,
+              runner_dist=1.17, fading_r=0.985, bins=11, seq_pct=0.91)
+    assert A.hunt_line(a) == (
+        "ATTRIBUTION   ✓ Corp +3 (…00:01:c*)  dist 0.02dB  margin 1.15dB  "
+        "fading r=+0.98 (11 bins)  seq +1: 91%   runner-up Walkin (…00:02:a*)")
+
+
+def test_hunt_line_maybe_with_missing_r_and_one_chain():
+    r = _named_radio("02:00:5e:00:01:c", "Corp")
+    a = _attr(marker=A.MARK_MAYBE, radio=r, dist=0.40, margin=None, fading_r=None,
+              bins=2, seq_pct=None, one_chain=True)
+    assert A.hunt_line(a) == (
+        "ATTRIBUTION   ? Corp (…00:01:c*)  dist 0.40dB  (1-chain: combined only)  "
+        "margin only AP on ch  fading r=– (2 bins)  seq +1: –")
+
+
+def test_hunt_line_none_names_nearest():
+    r = _named_radio("02:00:5e:00:02:a", "Walkin")
+    a = _attr(marker=A.MARK_NONE, radio=r, dist=9.4)
+    assert A.hunt_line(a) == ("ATTRIBUTION   ✗ no beaconing AP within 6dB "
+                              "(nearest Walkin at 9.4dB) — likely a separate device")
+
+
+def test_hunt_line_na():
+    assert A.hunt_line(_attr(marker=A.MARK_NA)) == \
+        "ATTRIBUTION   – no beacons heard on this channel yet"

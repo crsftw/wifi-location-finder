@@ -21,6 +21,7 @@ the same engine over a capture (tshark -r), which is how it is validated.
 """
 
 import argparse
+import decimal
 import math
 import re
 import statistics
@@ -340,3 +341,50 @@ def attribute_channel(freq, tracks, sa=None):
             continue
         out.extend(attribute(f, s, st, tracks))
     return out
+
+
+# ==========================================================================
+# 6. Display strings (shared by the list column and the hunt screen)
+# ==========================================================================
+
+def key_tail(radio):
+    """'…00:0a:c*' — the last two octets and the block nibble of a radio key."""
+    return f"…{radio.key[-7:]}*"
+
+
+def _name(radio):
+    return f"{radio.name()} ({key_tail(radio)})"
+
+
+def short_label(a):
+    """The LIKELY SOURCE cell: marker, radio, and the margin when confident."""
+    if a.marker == MARK_NA:
+        return MARK_NA
+    if a.marker == MARK_NONE:
+        return f"{MARK_NONE} no AP match — separate device?"
+    s = f"{a.marker} {_name(a.radio)}"
+    if a.marker == MARK_OK:
+        if a.margin is not None:
+            margin_rounded = float(decimal.Decimal(str(a.margin)).quantize(
+                decimal.Decimal('0.1'), rounding=decimal.ROUND_HALF_UP))
+            s += f"  {margin_rounded:.1f}dB"
+        else:
+            s += "  only AP on ch"
+    return s
+
+
+def hunt_line(a):
+    """One line for the hunt screen, with every number behind the verdict."""
+    if a.marker == MARK_NA:
+        return f"ATTRIBUTION   {MARK_NA} no beacons heard on this channel yet"
+    if a.marker == MARK_NONE:
+        near = f" (nearest {a.radio.name()} at {a.dist:.1f}dB)" if a.radio else ""
+        return (f"ATTRIBUTION   {MARK_NONE} no beaconing AP within {DIST_NONE:.0f}dB"
+                f"{near} — likely a separate device")
+    chain = "  (1-chain: combined only)" if a.one_chain else ""
+    margin = f"{a.margin:.2f}dB" if a.margin is not None else "only AP on ch"
+    r = f"{a.fading_r:+.2f}" if a.fading_r is not None else "–"
+    seq = f"{a.seq_pct * 100:.0f}%" if a.seq_pct is not None else "–"
+    ru = f"   runner-up {_name(a.runner_up)}" if a.runner_up else ""
+    return (f"ATTRIBUTION   {a.marker} {_name(a.radio)}  dist {a.dist:.2f}dB{chain}  "
+            f"margin {margin}  fading r={r} ({a.bins} bins)  seq +1: {seq}{ru}")
