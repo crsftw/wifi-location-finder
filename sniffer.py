@@ -152,6 +152,9 @@ class Aggregator:
         now = time.time() if now is None else now
         freq = rec["freq"]
         ts = rec.get("ts") or now
+        # one per-frame RSSI/seq sample, reused by both attribution branches
+        sample = (attribution.make_sample(ts, rec["chains"], rec.get("seq"))
+                  if rec.get("chains") else None)
         if freq:
             self.freq_ts.setdefault(freq, deque()).append(now)
         # remember where each transmitter was last heard (for MAC auto-locate)
@@ -160,9 +163,8 @@ class Aggregator:
                 self.seen_ch[who] = freq
         if rec["st"] in (BEACON, PROBE_RESP) and rec["bssid"]:
             self._add_net(rec)
-            if rec["st"] == BEACON and freq and rec.get("chains"):
-                self.tracks.add_radio(freq, rec["bssid"], rec["ssid"],
-                                      attribution.make_sample(ts, rec["chains"], rec.get("seq")))
+            if rec["st"] == BEACON and freq and sample:
+                self.tracks.add_radio(freq, rec["bssid"], rec["ssid"], sample)
         elif rec["st"] in (DEAUTH, DISASSOC) and freq:
             src = rec["sa"] or "??"
             key = (freq, src, rec["st"])
@@ -171,9 +173,8 @@ class Aggregator:
             if rec["rssi"] is not None:
                 self.deauth_rssi[key] = rec["rssi"]
             # only a source we have never heard beacon can be spoofed
-            if rec.get("chains") and src not in self.tracks.bssids:
-                self.tracks.add_source(freq, src, rec["st"],
-                                       attribution.make_sample(ts, rec["chains"], rec.get("seq")))
+            if sample and src not in self.tracks.bssids:
+                self.tracks.add_source(freq, src, rec["st"], sample)
         elif rec["st"] == PROBE_REQ:
             self._add_client(rec, now)
 
@@ -326,9 +327,15 @@ class Aggregator:
             rows.append({"kind": "all", "freq": freq, "src": None, "st": None,
                          "type": "", "rate": rate, "rssi": None,
                          "flood": rate >= rate_threshold, "attrib": None})
-        for (freq, src, st), dq in self.deauth_ts.items():
+        for (freq, src, st), dq in list(self.deauth_ts.items()):
             self._trim(dq, now, w)
             if not dq:
+                # forget a source that has gone quiet so deauth_ts,
+                # deauth_rssi and the attrib cache do not grow without bound
+                # under a randomised-source flood
+                del self.deauth_ts[(freq, src, st)]
+                self.deauth_rssi.pop((freq, src, st), None)
+                self._attrib_cache.pop((freq, src, st), None)
                 continue
             rate = len(dq) / w
             flood = rate >= rate_threshold

@@ -128,19 +128,15 @@ class Tracks:
         """Drop samples older than the window and forget sources that have
         nothing left. Called by the screens with wall-clock `now`; the
         per-append trim only runs when a track is still receiving."""
-        cutoff = now - self.window
         for key in list(self.sources):
             dq = self.sources[key]
-            while dq and dq[0].ts < cutoff:
-                dq.popleft()
+            self._evict(dq, now)
             if not dq:
                 del self.sources[key]
         for key in list(self.radios):
-            dq = self.radios[key].samples
-            while dq and dq[0].ts < cutoff:
-                dq.popleft()
             # keep the RadioTrack itself: its bssids/ssids are still the
             # radio's identity and it will beacon again
+            self._evict(self.radios[key].samples, now)
 
     def add_source(self, freq, sa, subtype, sample):
         dq = self.sources.setdefault((freq, sa, subtype), deque())
