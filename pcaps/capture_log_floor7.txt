@@ -1,0 +1,71 @@
+interface : wlan1 (monitor)
+floor     : 7   ->  ./pcaps/floor7
+channels  : 30   dwell: 60s each   (~30 min total)
+regdomain : GB
+
+[ 1/30] ch 36   capturing 60s -> floor_7_channel_36.pcapng
+[ 2/30] ch 40   capturing 60s -> floor_7_channel_40.pcapng
+[ 3/30] ch 44   capturing 60s -> floor_7_channel_44.pcapng
+[ 4/30] ch 48   capturing 60s -> floor_7_channel_48.pcapng
+[ 5/30] ch 52   capturing 60s -> floor_7_channel_52.pcapng
+[ 6/30] ch 56   capturing 60s -> floor_7_channel_56.pcapng
+[ 7/30] ch 60   capturing 60s -> floor_7_channel_60.pcapng
+[ 8/30] ch 64   capturing 60s -> floor_7_channel_64.pcapng
+[ 9/30] ch 68   refused by adapter/regdomain — skipped
+[10/30] ch 96   refused by adapter/regdomain — skipped
+[11/30] ch 100  capturing 60s -> floor_7_channel_100.pcapng
+[12/30] ch 104  capturing 60s -> floor_7_channel_104.pcapng
+[13/30] ch 108  capturing 60s -> floor_7_channel_108.pcapng
+[14/30] ch 112  capturing 60s -> floor_7_channel_112.pcapng
+[15/30] ch 116  capturing 60s -> floor_7_channel_116.pcapng
+[16/30] ch 120  capturing 60s -> floor_7_channel_120.pcapng
+[17/30] ch 124  capturing 60s -> floor_7_channel_124.pcapng
+[18/30] ch 128  capturing 60s -> floor_7_channel_128.pcapng
+[19/30] ch 132  capturing 60s -> floor_7_channel_132.pcapng
+[20/30] ch 136  capturing 60s -> floor_7_channel_136.pcapng
+[21/30] ch 140  capturing 60s -> floor_7_channel_140.pcapng
+[22/30] ch 144  capturing 60s -> floor_7_channel_144.pcapng
+[23/30] ch 149  capturing 60s -> floor_7_channel_149.pcapng
+[24/30] ch 153  capturing 60s -> floor_7_channel_153.pcapng
+[25/30] ch 157  capturing 60s -> floor_7_channel_157.pcapng
+[26/30] ch 161  capturing 60s -> floor_7_channel_161.pcapng
+[27/30] ch 165  capturing 60s -> floor_7_channel_165.pcapng
+[28/30] ch 169  refused by adapter/regdomain — skipped
+[29/30] ch 173  refused by adapter/regdomain — skipped
+[30/30] ch 177  refused by adapter/regdomain — skipped
+
+================ summary: floor 7  (25 min) ================
+ch     packets   beacons    spoofed    size
+                            deauths*   
+36     59128     6863       198        13M
+40     21098     4603       0          6.0M
+44     76927     20320      2620       22M
+48     15062     0          0          1.6M
+52     108564    16906      0          21M
+56     51998     0          0          5.3M
+60     57805     5676       589        8.9M
+64     78128     15755      1018       18M
+100    101659    1498       0          12M
+104    134217    8749       622        20M
+108    69316     14971      0          16M
+112    31619     0          0          3.3M
+116    106160    12308      1278       20M
+120    26161     0          0          2.7M
+124    51235     618        0          5.5M
+128    70654     12166      0          15M
+132    96474     12952      2554       18M
+136    48946     0          0          5.0M
+140    94481     3752       0          43M
+144    17        0          0          4.0K
+149    411       62         0          100K
+153    664       0          0          116K
+157    58305     2243       0          7.5M
+161    3016      995        0          932K
+165    202       0          0          48K
+* deauth frames with source ff:ff:ff:ff:ff:ff — the containment signature
+
+channels refused by the adapter: 68 96 169 173 177
+  (outside the current regulatory domain: 'iw reg get'. Nothing was captured there.)
+
+files in ./pcaps/floor7
+                                                          

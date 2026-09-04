@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+
+# Raw captures: one 60 s pcapng per channel per floor, hundreds of MB per sweep.
+# The analysis notes and capture logs alongside them ARE tracked.
+pcaps/**/*.pcapng
