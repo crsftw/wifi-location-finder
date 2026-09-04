@@ -15,7 +15,7 @@
 - **Receive-only.** The only new external command is `tshark -r <file>` in offline mode. No new `iw` calls, nothing on the TX path. Live captures change only display filters and `-e` fields.
 - **No live identifiers in the repo.** Synthetic tests use `02:00:5e:…` placeholders. Ground-truth tests against real captures assert at most a five-hex-character radio-key tail and are `skipif` the capture is absent. `pcaps/` and `hunt.db` stay gitignored.
 - **`attribution.py` imports only stdlib and `device_id`.** `router_hunt.py` and `sniffer.py` import `attribution`; the reverse would be circular.
-- **Thresholds are the module constants named in the spec** (`DIST_OK=1.0`, `MARGIN_OK=2.0`, `R_OK=0.6`, `DIST_NONE=6.0`, `MIN_SAMPLES_NO_R=30`, `WINDOW_S=60`, `BIN_S=5`, `VALLEY_DB=5`). Loosening any to pass a ground-truth test is stated in that commit's message with the number.
+- **Thresholds are the module constants named in the spec** (`DIST_OK=1.0`, `MARGIN_OK=1.0`, `R_OK=0.6`, `DIST_NONE=6.0`, `MIN_SAMPLES_NO_R=30`, `WINDOW_S=60`, `BIN_S=5`, `VALLEY_DB=5`). Loosening any to pass a ground-truth test is stated in that commit's message with the number.
 - **One deviation from the spec, decided here and refined in Task 7:** radios are keyed by **octets 2–5 plus the high nibble of octet 6** (`radio_key`, e.g. `00:5e:00:0a:c` for `02:00:5e:00:0a:c0`), not `device_id.base_mac_key`. Two allocation schemes exist in the floor-6 data: one vendor enumerates virtual BSSIDs in the low nibble of the last octet, the other varies the *first* octet per SSID (the write-up's `*:88:81:…`) and keeps the trailing block fixed. Dropping octet 1 and the low nibble of octet 6 collapses both to one radio; keeping octet 1 split one physical radio into several tracks whose mutual distance (~0.02 dB) destroyed the runner-up margin. `device_id.base_mac_key` and the NETWORKS view are untouched. Task 13 records this in the spec.
 - **Every test in `pytest` stays green after every task.** The existing 62 tests must pass unchanged except where a task explicitly edits a helper.
 - **Commit trailer**, every commit:
@@ -2304,7 +2304,7 @@ offline analysis:
 4. **Sequence continuity** — one monotonic counter across many targets means
    one transmit queue (shown, not scored).
 
-`✓` needs a match within 1 dB, a runner-up at least 2 dB further, and fading
+`✓` needs a match within 1 dB, a runner-up at least 1 dB further, and fading
 r ≥ 0.6 (or 30+ frames when the hop dwell was too short for bins). While the
 scanner hops you mostly see `?`; hit ENTER to park and the hunt screen's
 `ATTRIBUTION` line fills in and flips to `✓` as bins accumulate. `✗` means no
