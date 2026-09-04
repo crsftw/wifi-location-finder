@@ -159,6 +159,19 @@ def test_cluster_sparse_valley_still_needs_fraction_rule():
     assert len(cl[0]) == 105 and len(cl[1]) == 30
 
 
+def test_cluster_new_cluster_peak_is_its_own_first_bin():
+    # the bin that triggers the empty-gap cut (-70, weak vs the *old* peak
+    # 1000) must become the *new* cluster's own peak, not some later bin -
+    # otherwise the fraction rule measures the -71..-75 valley against a
+    # stale, much smaller number and a legitimate third radio (-76) is
+    # absorbed instead of split off
+    samples = ([_s(-40) for _ in range(1000)]
+               + [_s(-70) for _ in range(50)]
+               + [_s(db) for db in (-71, -72, -73, -74, -75)]
+               + [_s(-76) for _ in range(30)])
+    assert [len(g) for g in A.cluster(samples)] == [1000, 55, 30]
+
+
 def test_cluster_empty():
     assert A.cluster([]) == []
 

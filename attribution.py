@@ -209,11 +209,11 @@ def cluster(samples):
             continue
         strong = c >= VALLEY_FRAC * peak
         if empty >= VALLEY_DB or (valley >= VALLEY_DB and strong):
-            cuts.append(db)          # this bin starts the new cluster
-            peak = 0
-            valley = 0
-            empty = 0
-        if strong:
+            cuts.append(db)          # this bin starts the new cluster...
+            peak = c                 # ...and is unconditionally its peak,
+            valley = 0                # regardless of whether it cleared the
+            empty = 0                 # old cluster's fraction threshold
+        elif strong:
             peak = max(peak, c)
             valley = 0
             empty = 0
