@@ -99,6 +99,16 @@ class RadioTrack:
         self.samples = deque()
         self.bssids = set()
         self.ssids = Counter()
+        self.bssid_of = {}      # ssid ('' for hidden) -> first BSSID seen carrying it
+
+    def display_bssid(self):
+        """The full BSSID to show for this radio: the one carrying its
+        most-seen SSID, else the lowest BSSID heard, else None."""
+        ssid = self.ssids.most_common(1)[0][0] if self.ssids else ""
+        b = self.bssid_of.get(ssid)
+        if b is None and self.bssids:
+            b = sorted(self.bssids)[0]
+        return b
 
     def name(self):
         """Display name as the NETWORKS device view names it: most-seen SSID
@@ -154,6 +164,7 @@ class Tracks:
         r.samples.append(sample)
         self._evict(r.samples, sample.ts)
         r.bssids.add(bssid)
+        r.bssid_of.setdefault(ssid or "", bssid)
         if ssid:
             r.ssids[ssid] += 1
         if bssid not in self.bssids:
@@ -403,7 +414,9 @@ def key_tail(radio):
 
 
 def _name(radio):
-    return f"{radio.name()} ({key_tail(radio)})"
+    """'Corp +3 (02:00:5e:00:01:c0)' - the full BSSID, so the operator can
+    act on it; the key tail only when a track was built without one."""
+    return f"{radio.name()} ({radio.display_bssid() or key_tail(radio)})"
 
 
 def short_label(a):

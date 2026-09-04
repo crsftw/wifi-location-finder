@@ -456,7 +456,23 @@ def _named_radio(key, ssid, n_bssids=1):
     r.ssids[ssid] += 1
     for i in range(n_bssids):
         r.bssids.add(f"{key}{i:x}")
+    r.bssid_of[ssid] = f"{key}0"
     return r
+
+
+def test_display_bssid_follows_the_most_seen_ssid_then_falls_back():
+    t = A.Tracks()
+    t.add_radio(5540, "02:00:5e:00:01:c1", "Guest", A.Sample(1.0, -60, None, None, None))
+    t.add_radio(5540, "02:00:5e:00:01:c0", "Corp", A.Sample(2.0, -60, None, None, None))
+    t.add_radio(5540, "02:00:5e:00:01:c0", "Corp", A.Sample(3.0, -60, None, None, None))
+    r = t.radios_on(5540)[0]
+    assert r.name() == "Corp +1" and r.display_bssid() == "02:00:5e:00:01:c0"
+    hidden = A.Tracks()
+    hidden.add_radio(2437, "02:00:5e:00:02:a3", "", A.Sample(1.0, -50, None, None, None))
+    hidden.add_radio(2437, "02:00:5e:00:02:a1", "", A.Sample(2.0, -50, None, None, None))
+    assert hidden.radios_on(2437)[0].display_bssid() == "02:00:5e:00:02:a3"   # first seen carrying ''
+    bare = A.RadioTrack("00:5e:00:09:0")
+    assert bare.display_bssid() is None and A._name(bare) == "<hidden> (…00:09:0*)"
 
 
 def test_key_tail():
@@ -466,19 +482,19 @@ def test_key_tail():
 def test_short_label_ok_shows_name_tail_and_margin():
     r = _named_radio("02:00:5e:00:01:c", "Corp", 4)
     a = _attr(marker=A.MARK_OK, radio=r, dist=0.02, margin=1.15)
-    assert A.short_label(a) == "✓ Corp +3 (…00:01:c*)  1.2dB"
+    assert A.short_label(a) == "✓ Corp +3 (02:00:5e:00:01:c0)  1.2dB"
 
 
 def test_short_label_ok_only_radio_on_channel():
     r = _named_radio("02:00:5e:00:01:c", "Corp")
     a = _attr(marker=A.MARK_OK, radio=r, dist=0.02, margin=None)
-    assert A.short_label(a) == "✓ Corp (…00:01:c*)  only AP on ch"
+    assert A.short_label(a) == "✓ Corp (02:00:5e:00:01:c0)  only AP on ch"
 
 
 def test_short_label_maybe_has_no_margin():
     r = _named_radio("02:00:5e:00:01:c", "Corp")
     a = _attr(marker=A.MARK_MAYBE, radio=r, dist=0.5, margin=0.8)
-    assert A.short_label(a) == "? Corp (…00:01:c*)"
+    assert A.short_label(a) == "? Corp (02:00:5e:00:01:c0)"
 
 
 def test_short_label_none_and_na():
@@ -494,8 +510,8 @@ def test_hunt_line_ok_carries_every_number():
     a = _attr(marker=A.MARK_OK, radio=r, dist=0.02, margin=1.15, runner_up=ru,
               runner_dist=1.17, fading_r=0.985, bins=11, seq_pct=0.91)
     assert A.hunt_line(a) == (
-        "ATTRIBUTION   ✓ Corp +3 (…00:01:c*)  dist 0.02dB  margin 1.15dB  "
-        "fading r=+0.98 (11 bins)  seq +1: 91%   runner-up Walkin (…00:02:a*)")
+        "ATTRIBUTION   ✓ Corp +3 (02:00:5e:00:01:c0)  dist 0.02dB  margin 1.15dB  "
+        "fading r=+0.98 (11 bins)  seq +1: 91%   runner-up Walkin (02:00:5e:00:02:a0)")
 
 
 def test_hunt_line_maybe_with_missing_r_and_one_chain():
@@ -503,7 +519,7 @@ def test_hunt_line_maybe_with_missing_r_and_one_chain():
     a = _attr(marker=A.MARK_MAYBE, radio=r, dist=0.40, margin=None, fading_r=None,
               bins=2, seq_pct=None, one_chain=True)
     assert A.hunt_line(a) == (
-        "ATTRIBUTION   ? Corp (…00:01:c*)  dist 0.40dB  (1-chain: combined only)  "
+        "ATTRIBUTION   ? Corp (02:00:5e:00:01:c0)  dist 0.40dB  (1-chain: combined only)  "
         "margin only AP on ch  fading r=– (2 bins)  seq +1: –")
 
 
