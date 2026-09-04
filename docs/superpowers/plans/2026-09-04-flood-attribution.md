@@ -971,7 +971,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `Attribution`
-- Produces: `short_label(a) -> str` (list column), `hunt_line(a) -> str` (one hunt-screen line, starts with `ATTRIBUTION`), `key_tail(radio) -> str` (`"…f1:8a:c*"`)
+- Produces: `short_label(a) -> str` (list column), `hunt_line(a) -> str` (one hunt-screen line, starts with `ATTRIBUTION`), `key_tail(radio) -> str` (`"…00:0a:c*"`)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -987,7 +987,7 @@ def _named_radio(key, ssid, n_bssids=1):
 
 
 def test_key_tail():
-    assert A.key_tail(A.RadioTrack("02:00:5e:00:0a:c")) == "…f1:8a:c*"
+    assert A.key_tail(A.RadioTrack("02:00:5e:00:0a:c")) == "…00:0a:c*"
 
 
 def test_short_label_ok_shows_name_tail_and_margin():
@@ -1059,7 +1059,7 @@ Expected: FAIL with `AttributeError`
 # ==========================================================================
 
 def key_tail(radio):
-    """'…f1:8a:c*' — the last two octets and the block nibble of a radio key."""
+    """'…00:0a:c*' — the last two octets and the block nibble of a radio key."""
     return f"…{radio.key[-7:]}*"
 
 
@@ -1312,7 +1312,7 @@ Run: `chmod +x attribution.py && ./attribution.py --pcap pcaps/floor6/floor_6_ch
 Expected: one row, `✓`, radio tail `…f1:79:4*`, `dist` ≈ 0.02, `margin` ≈ 1.1–1.3, `r` ≈ +0.98, seq `+1` ≈ 80–95 %.
 
 Run: `./attribution.py --pcap pcaps/floor6/floor_6_channel_44.pcapng`
-Expected: two rows, `…f1:8a:c*` strong and `…f1:8a:6*` weak.
+Expected: two rows, `…00:0a:c*` strong and `…f1:8a:6*` weak.
 
 - [ ] **Step 6: Commit**
 
