@@ -16,7 +16,7 @@
 - **No live identifiers in the repo.** Synthetic tests use `02:00:5e:…` placeholders. Ground-truth tests against real captures assert at most a five-hex-character radio-key tail and are `skipif` the capture is absent. `pcaps/` and `hunt.db` stay gitignored.
 - **`attribution.py` imports only stdlib and `device_id`.** `router_hunt.py` and `sniffer.py` import `attribution`; the reverse would be circular.
 - **Thresholds are the module constants named in the spec** (`DIST_OK=1.0`, `MARGIN_OK=2.0`, `R_OK=0.6`, `DIST_NONE=6.0`, `MIN_SAMPLES_NO_R=30`, `WINDOW_S=60`, `BIN_S=5`, `VALLEY_DB=5`). Loosening any to pass a ground-truth test is stated in that commit's message with the number.
-- **One deviation from the spec, decided here:** radios are keyed by the first five octets **plus the high nibble of the sixth** (`radio_key`, e.g. `02:00:5e:00:0a:c`), not `device_id.base_mac_key`. Reason: the floor-6 channel 44 has two physical radios (`…f1:8a:c0` and `…f1:8a:60`) in the same five-octet block beaconing on one channel; a five-octet key would merge their beacon vectors and break the match. `device_id.base_mac_key` and the NETWORKS view are untouched. Task 13 records this in the spec.
+- **One deviation from the spec, decided here and refined in Task 7:** radios are keyed by **octets 2–5 plus the high nibble of octet 6** (`radio_key`, e.g. `00:5e:00:0a:c` for `02:00:5e:00:0a:c0`), not `device_id.base_mac_key`. Two allocation schemes exist in the floor-6 data: one vendor enumerates virtual BSSIDs in the low nibble of the last octet, the other varies the *first* octet per SSID (the write-up's `*:88:81:…`) and keeps the trailing block fixed. Dropping octet 1 and the low nibble of octet 6 collapses both to one radio; keeping octet 1 split one physical radio into several tracks whose mutual distance (~0.02 dB) destroyed the runner-up margin. `device_id.base_mac_key` and the NETWORKS view are untouched. Task 13 records this in the spec.
 - **Every test in `pytest` stays green after every task.** The existing 62 tests must pass unchanged except where a task explicitly edits a helper.
 - **Commit trailer**, every commit:
   ```
@@ -2346,11 +2346,15 @@ method applied to a floor's worth of captures.
 - [ ] **Step 5: Spec note** — in the spec, under `## Engine: attribution.py`, replace the sentence beginning `Physical radio key is` with:
 
 ```markdown
-Physical radio key is `attribution.radio_key`: the first five octets plus the
-high nibble of the sixth (`02:00:5e:00:0a:c`). The spec originally said
-`device_id.base_mac_key` (five octets); the floor-6 channel 44 has two radios
-in one five-octet block on the same channel, which a five-octet key would
-merge. `device_id.base_mac_key` and the NETWORKS view are unchanged.
+Physical radio key is `attribution.radio_key`: octets 2–5 plus the high
+nibble of octet 6 (`00:5e:00:0a:c` for `02:00:5e:00:0a:c0`). The spec
+originally said `device_id.base_mac_key` (five octets). Two allocation
+schemes appear in the floor-6 data — virtual BSSIDs enumerated in the low
+nibble of the last octet, or a per-SSID first octet with a fixed trailing
+block — and only this key collapses both to one radio; a five-octet key
+merged two radios on channel 44 and split one radio into several tracks
+elsewhere, collapsing the runner-up margin. `device_id.base_mac_key` and
+the NETWORKS view are unchanged.
 ```
 
 - [ ] **Step 6: Check the README renders and the suite is green**
