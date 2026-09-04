@@ -236,3 +236,126 @@ def test_seq_continuity_ignores_duplicate_frames_and_orders_by_time():
 def test_seq_continuity_none_without_two_sequenced_frames():
     assert A.seq_continuity([_s(-60, seq=5)]) is None
     assert A.seq_continuity([_s(-60), _s(-60)]) is None
+
+
+# ---- 5. verdict + attribute ----
+
+def _attr(**kw):
+    base = dict(freq=5540, sa="ff:ff:ff:ff:ff:ff", subtype=A.DEAUTH, samples=100,
+                rssi_mean=-60.0, marker=A.MARK_NA, radio=None, dist=None, margin=None,
+                runner_up=None, runner_dist=None, fading_r=None, bins=0,
+                seq_pct=None, one_chain=False)
+    base.update(kw)
+    return A.Attribution(**base)
+
+
+def test_verdict_na_without_any_candidate():
+    assert A.verdict(_attr(dist=None)) == A.MARK_NA
+
+
+def test_verdict_confident_when_all_thresholds_pass():
+    r = A.RadioTrack("02:00:5e:00:01:c")
+    assert A.verdict(_attr(radio=r, dist=0.5, margin=3.0, fading_r=0.8, bins=6)) == A.MARK_OK
+
+
+def test_verdict_confident_without_r_if_enough_samples():
+    r = A.RadioTrack("02:00:5e:00:01:c")
+    assert A.verdict(_attr(radio=r, dist=0.5, margin=3.0, fading_r=None, samples=30)) == A.MARK_OK
+    assert A.verdict(_attr(radio=r, dist=0.5, margin=3.0, fading_r=None, samples=29)) == A.MARK_MAYBE
+
+
+def test_verdict_confident_when_only_radio_on_channel():
+    r = A.RadioTrack("02:00:5e:00:01:c")
+    assert A.verdict(_attr(radio=r, dist=0.5, margin=None, fading_r=0.9, bins=5)) == A.MARK_OK
+
+
+def test_verdict_maybe_when_any_threshold_fails():
+    r = A.RadioTrack("02:00:5e:00:01:c")
+    assert A.verdict(_attr(radio=r, dist=1.5, margin=3.0, fading_r=0.8)) == A.MARK_MAYBE   # dist
+    assert A.verdict(_attr(radio=r, dist=0.5, margin=1.0, fading_r=0.8)) == A.MARK_MAYBE   # margin
+    assert A.verdict(_attr(radio=r, dist=0.5, margin=3.0, fading_r=0.3)) == A.MARK_MAYBE   # r
+
+
+def test_verdict_none_beyond_dist_none():
+    r = A.RadioTrack("02:00:5e:00:01:c")
+    assert A.verdict(_attr(radio=r, dist=6.1, margin=10.0, fading_r=0.9)) == A.MARK_NONE
+    assert A.verdict(_attr(radio=r, dist=6.0, margin=1.0, fading_r=0.9)) == A.MARK_MAYBE
+
+
+def _scene():
+    """Channel 5540: a flood at -59/-62/-61 matching radio C, radio A 8 dB off,
+    both radios and the flood fading together over 60 s."""
+    t = A.Tracks()
+    for i in range(120):
+        ts = i * 0.5
+        d = _drift(ts)
+        t.add_source(5540, "ff:ff:ff:ff:ff:ff", A.DEAUTH,
+                     A.Sample(ts, -59 + d, -62 + d, -61 + d, 600 + i))
+        t.add_radio(5540, "02:00:5e:00:01:c0", "Corp", A.Sample(ts, -59 + d, -62 + d, -61 + d, None))
+        t.add_radio(5540, "02:00:5e:00:01:c1", "Guest", A.Sample(ts, -59 + d, -62 + d, -61 + d, None))
+        t.add_radio(5540, "02:00:5e:00:02:a0", "Other", A.Sample(ts, -67 + d, -70 + d, -69 + d, None))
+    return t
+
+
+def test_attribute_names_matching_radio_with_numbers():
+    t = _scene()
+    out = A.attribute(5540, "ff:ff:ff:ff:ff:ff", A.DEAUTH, t)
+    assert len(out) == 1
+    a = out[0]
+    assert a.marker == A.MARK_OK
+    assert a.radio.key == "02:00:5e:00:01:c"
+    assert a.radio.name() == "Corp +1"
+    assert a.dist == pytest.approx(0.0, abs=1e-6)
+    assert a.runner_up.key == "02:00:5e:00:02:a"
+    assert a.margin == pytest.approx(math.sqrt(3 * 64), abs=1e-6)
+    assert a.fading_r > 0.99 and a.bins >= 10
+    assert a.seq_pct == pytest.approx(1.0)
+    assert a.samples == 120 and a.rssi_mean == pytest.approx(-59, abs=3)
+    assert a.one_chain is False
+
+
+def test_attribute_returns_one_result_per_cluster():
+    t = _scene()
+    for i in range(60):                       # a second, weak radio spoofing the same address
+        t.add_source(5540, "ff:ff:ff:ff:ff:ff", A.DEAUTH,
+                     A.Sample(i, -91, -93, -92, 900 + i))
+    t.add_radio(5540, "02:00:5e:00:03:60", "Far", A.Sample(1.0, -91, -93, -92, None))
+    t.add_radio(5540, "02:00:5e:00:03:60", "Far", A.Sample(2.0, -91, -93, -92, None))
+    out = A.attribute(5540, "ff:ff:ff:ff:ff:ff", A.DEAUTH, t)
+    assert [a.radio.key for a in out] == ["02:00:5e:00:01:c", "02:00:5e:00:03:6"]
+    assert out[0].rssi_mean > out[1].rssi_mean
+
+
+def test_attribute_na_when_no_beacons_on_channel():
+    t = A.Tracks()
+    for i in range(40):
+        t.add_source(5320, "fe:ff:ff:ff:ff:ff", A.DEAUTH, A.Sample(i, -66, -68, -67, i))
+    out = A.attribute(5320, "fe:ff:ff:ff:ff:ff", A.DEAUTH, t)
+    assert len(out) == 1 and out[0].marker == A.MARK_NA and out[0].radio is None
+
+
+def test_attribute_none_when_nearest_radio_is_far():
+    t = A.Tracks()
+    for i in range(40):
+        t.add_source(5320, "fe:ff:ff:ff:ff:ff", A.DEAUTH, A.Sample(i, -66, -68, -67, i))
+        t.add_radio(5320, "02:00:5e:00:01:c0", "Corp", A.Sample(i, -80, -82, -81, None))
+    a = A.attribute(5320, "fe:ff:ff:ff:ff:ff", A.DEAUTH, t)[0]
+    assert a.marker == A.MARK_NONE
+    assert a.radio.key == "02:00:5e:00:01:c"       # nearest is still reported
+    assert a.dist > A.DIST_NONE
+
+
+def test_attribute_empty_source_gives_nothing():
+    assert A.attribute(5540, "ff:ff:ff:ff:ff:ff", A.DEAUTH, A.Tracks()) == []
+
+
+def test_attribute_channel_covers_every_source_or_just_one():
+    t = _scene()
+    for i in range(40):
+        t.add_source(5540, "fe:ff:ff:ff:ff:ff", A.DISASSOC, A.Sample(i, -67, -70, -69, i))
+    allk = A.attribute_channel(5540, t)
+    assert {(a.sa, a.subtype) for a in allk} == {("ff:ff:ff:ff:ff:ff", A.DEAUTH),
+                                                  ("fe:ff:ff:ff:ff:ff", A.DISASSOC)}
+    one = A.attribute_channel(5540, t, sa="fe:ff:ff:ff:ff:ff")
+    assert len(one) == 1 and one[0].radio.key == "02:00:5e:00:02:a"
+    assert A.attribute_channel(2437, t) == []

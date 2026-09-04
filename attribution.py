@@ -260,3 +260,83 @@ def seq_continuity(cluster):
         return None
     hits = sum(1 for p, q in pairs if (q - p) % SEQ_MOD == 1)
     return hits / len(pairs)
+
+
+# ==========================================================================
+# 5. Verdict
+# ==========================================================================
+
+MARK_OK, MARK_MAYBE, MARK_NONE, MARK_NA = "✓", "?", "✗", "–"
+
+
+@dataclass
+class Attribution:
+    freq: int
+    sa: str
+    subtype: int
+    samples: int
+    rssi_mean: float
+    marker: str
+    radio: object            # RadioTrack or None
+    dist: float
+    margin: float            # None when the radio is the only candidate
+    runner_up: object        # RadioTrack or None
+    runner_dist: float
+    fading_r: float
+    bins: int
+    seq_pct: float
+    one_chain: bool
+
+    @property
+    def type_name(self):
+        return TYPE_NAMES.get(self.subtype, str(self.subtype))
+
+
+def verdict(a):
+    """✓ confident, ? some threshold fails, ✗ nothing beacons within
+    DIST_NONE (a separate device), – no beacons on the channel at all."""
+    if a.dist is None:
+        return MARK_NA
+    if a.dist > DIST_NONE:
+        return MARK_NONE
+    ok_dist = a.dist <= DIST_OK
+    ok_margin = a.margin is None or a.margin >= MARGIN_OK
+    if a.fading_r is not None:
+        ok_r = a.fading_r >= R_OK
+    else:
+        ok_r = a.samples >= MIN_SAMPLES_NO_R
+    return MARK_OK if (ok_dist and ok_margin and ok_r) else MARK_MAYBE
+
+
+def attribute(freq, sa, subtype, tracks):
+    """One Attribution per RSSI cluster of this spoofed source, strongest first."""
+    samples = tracks.source(freq, sa, subtype)
+    radios = [r for r in tracks.radios_on(freq) if r.samples]
+    out = []
+    for cl in cluster(samples):
+        a = Attribution(freq=freq, sa=sa, subtype=subtype, samples=len(cl),
+                        rssi_mean=statistics.fmean(s.combined for s in cl),
+                        marker=MARK_NA, radio=None, dist=None, margin=None,
+                        runner_up=None, runner_dist=None, fading_r=None, bins=0,
+                        seq_pct=seq_continuity(cl), one_chain=False)
+        cands = match(cl, radios)
+        if cands:
+            best = cands[0]
+            a.radio, a.dist, a.one_chain = best.radio, best.dist, best.one_chain
+            if len(cands) > 1:
+                a.runner_up, a.runner_dist = cands[1].radio, cands[1].dist
+                a.margin = cands[1].dist - best.dist
+            a.fading_r, a.bins = fading_r(cl, best.radio)
+        a.marker = verdict(a)
+        out.append(a)
+    return out
+
+
+def attribute_channel(freq, tracks, sa=None):
+    """Attributions for every spoofed source on a channel (or only `sa`)."""
+    out = []
+    for (f, s, st) in sorted(tracks.source_keys(freq)):
+        if sa is not None and s != sa:
+            continue
+        out.extend(attribute(f, s, st, tracks))
+    return out
