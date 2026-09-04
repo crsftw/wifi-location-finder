@@ -30,15 +30,15 @@ import sys
 from collections import Counter, defaultdict, deque, namedtuple
 from dataclasses import dataclass
 
-# ---- thresholds (from the floor-6 numbers: matches 0.02-0.17 dB, runner-ups
-# ---- 1.15-10.5 dB, fading r 0.69-0.99) ------------------------------------
+# ---- thresholds (from the floor-6 numbers: matches 0.02-0.23 dB, runner-ups
+# ---- 1.12-10.5 dB, fading r 0.64-0.99) ------------------------------------
 WINDOW_S = 60.0           # rolling history kept per track
 BIN_S = 5.0               # fading-correlation bin width
 MIN_BINS = 4              # fewer shared bins -> r is None
 VALLEY_DB = 5             # empty dB run that splits two clusters
 VALLEY_FRAC = 0.10        # "empty" = fewer than this fraction of the peak bin
 DIST_OK = 1.0             # vector distance for a confident match
-MARGIN_OK = 2.0           # runner-up must be this much further away
+MARGIN_OK = 1.1           # runner-up must be this much further away
 R_OK = 0.6                # fading correlation for a confident match
 DIST_NONE = 6.0           # beyond this, no beaconing AP matches at all
 MIN_SAMPLES_NO_R = 30     # ✓ without r needs at least this many frames
@@ -79,14 +79,17 @@ _MAC = re.compile(r"^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$")
 
 
 def radio_key(mac):
-    """One physical radio's address block: first five octets plus the high
-    nibble of the sixth, e.g. '02:00:5e:00:0a:c'. Multi-BSSID radios hand out
-    their virtual BSSIDs inside one such 16-address block, and two radios of
-    the same model can share the five-octet prefix on one channel."""
+    """One physical radio's address block: the last five octets, keeping
+    only the high nibble of the final one, e.g. '00:5e:00:0a:c'. A vendor
+    that enumerates virtual BSSIDs in the low nibble of the last octet is
+    absorbed by that truncation; hardware seen in the wild instead
+    randomizes the *first* octet per SSID (locally-administered bit set)
+    while keeping the trailing block fixed - dropping the first octet
+    handles both without misreading noise on it as a different radio."""
     m = (mac or "").lower().replace("-", ":")
     if not _MAC.match(m):
         return None
-    return m[:16]
+    return m[3:16]
 
 
 class RadioTrack:
@@ -388,3 +391,117 @@ def hunt_line(a):
     ru = f"   runner-up {_name(a.runner_up)}" if a.runner_up else ""
     return (f"ATTRIBUTION   {a.marker} {_name(a.radio)}  dist {a.dist:.2f}dB{chain}  "
             f"margin {margin}  fading r={r} ({a.bins} bins)  seq +1: {seq}{ru}")
+
+
+# ==========================================================================
+# 7. Offline: the same engine over a capture file
+# ==========================================================================
+
+PCAP_FIELDS = ["frame.time_epoch", "wlan.fc.type_subtype", "wlan.sa", "wlan.bssid",
+               "radiotap.channel.freq", "radiotap.dbm_antsignal", "wlan.seq",
+               "wlan.ssid"]                     # ssid last: it may contain '|'
+_N_PCAP_FIXED = len(PCAP_FIELDS) - 1
+_PCAP_FILTER = (f"wlan.fc.type_subtype=={BEACON} || wlan.fc.type_subtype=={DEAUTH}"
+                f" || wlan.fc.type_subtype=={DISASSOC}")
+
+
+def _first_int(v):
+    for tok in str(v or "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            return int(tok, 0) if tok.lower().startswith("0x") else int(tok)
+        except ValueError:
+            return None
+    return None
+
+
+def _decode_ssid(raw):
+    """tshark 4.x emits SSIDs as hex; hidden ones as '<MISSING>' or empty."""
+    raw = (raw or "").strip()
+    if not raw or raw == "<MISSING>":
+        return ""
+    if len(raw) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", raw):
+        try:
+            return bytes.fromhex(raw).decode("utf-8", "replace").rstrip("\x00")
+        except ValueError:
+            return raw
+    return raw
+
+
+def parse_pcap_line(line):
+    parts = line.split("|")
+    if len(parts) < len(PCAP_FIELDS):
+        return None
+    ts, st, sa, bssid, freq, sig, seq = parts[:_N_PCAP_FIXED]
+    try:
+        ts = float(ts)
+    except ValueError:
+        return None
+    return {"ts": ts, "st": _first_int(st),
+            "sa": sa.split(",")[0].strip().lower(),
+            "bssid": bssid.split(",")[0].strip().lower(),
+            "freq": _first_int(freq), "chains": parse_chains(sig),
+            "seq": _first_int(seq),
+            "ssid": _decode_ssid("|".join(parts[_N_PCAP_FIXED:]))}
+
+
+def analyse_pcap(path, subtype=None):
+    """Run the engine over a capture. Beacons are read first so every BSSID
+    is known before deciding which deauth/disassoc sources are spoofed.
+    Receive-only by construction: this reads a file."""
+    cmd = ["tshark", "-r", path, "-n", "-Q", "-Y", _PCAP_FILTER,
+           "-T", "fields", "-E", "separator=|", "-E", "occurrence=a"]
+    for f in PCAP_FIELDS:
+        cmd += ["-e", f]
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    tracks = Tracks(window=float("inf"))
+    floods = []
+    for line in out.splitlines():
+        rec = parse_pcap_line(line)
+        if rec is None or not rec["freq"] or not rec["chains"]:
+            continue
+        sample = make_sample(rec["ts"], rec["chains"], rec["seq"])
+        if rec["st"] == BEACON and rec["bssid"]:
+            tracks.add_radio(rec["freq"], rec["bssid"], rec["ssid"], sample)
+        elif rec["st"] in (DEAUTH, DISASSOC):
+            floods.append((rec, sample))
+    for rec, sample in floods:
+        if rec["sa"] in tracks.bssids:      # a real AP deauthing its client
+            continue
+        tracks.add_source(rec["freq"], rec["sa"], rec["st"], sample)
+    results = []
+    for freq in sorted({k[0] for k in tracks.sources}):
+        for a in attribute_channel(freq, tracks):
+            if subtype is None or a.subtype == subtype:
+                results.append(a)
+    return results
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Attribute spoofed-source deauth/disassoc floods in a capture "
+                    "to the beaconing radio behind them (reads a file; no radio).")
+    p.add_argument("--pcap", required=True, help="pcap/pcapng to analyse")
+    p.add_argument("--type", choices=["deauth", "disassoc"],
+                   help="only this flood type (default: both)")
+    args = p.parse_args()
+    st = {"deauth": DEAUTH, "disassoc": DISASSOC}.get(args.type)
+    try:
+        results = analyse_pcap(args.pcap, subtype=st)
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"tshark failed: {(e.stderr or '').strip()}")
+    except FileNotFoundError:
+        sys.exit("tshark not found (install wireshark-common)")
+    if not results:
+        print("no spoofed-source floods in this capture")
+        return
+    print(f"{'freq':>5} {'type':<8} {'source':<17} {'frames':>6} {'RSSI':>6}  verdict")
+    for a in results:
+        print(f"{a.freq:>5} {a.type_name:<8} {a.sa:<17} {a.samples:>6} "
+              f"{a.rssi_mean:>6.1f}  {hunt_line(a)[len('ATTRIBUTION   '):]}")
+
+
+if __name__ == "__main__":
+    main()

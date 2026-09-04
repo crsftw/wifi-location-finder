@@ -24,9 +24,9 @@ def test_make_sample_fills_missing_chains_with_none():
 
 
 def test_radio_key_is_five_octets_plus_high_nibble():
-    assert A.radio_key("02:00:5E:00:0A:C0") == "02:00:5e:00:0a:c"
-    assert A.radio_key("02:00:5e:00:0a:c3") == "02:00:5e:00:0a:c"
-    assert A.radio_key("02:00:5e:00:0a:60") == "02:00:5e:00:0a:6"
+    assert A.radio_key("02:00:5E:00:0A:C0") == "00:5e:00:0a:c"
+    assert A.radio_key("02:00:5e:00:0a:c3") == "00:5e:00:0a:c"
+    assert A.radio_key("02:00:5e:00:0a:60") == "00:5e:00:0a:6"
     assert A.radio_key("not-a-mac") is None
     assert A.radio_key("") is None
 
@@ -57,7 +57,7 @@ def test_tracks_group_beacons_per_radio_and_remember_bssids():
         t.add_radio(5220, f"02:00:5e:00:01:{last}", ssid, A.Sample(1.0, -61, -63, -62, None))
     t.add_radio(5220, "02:00:5e:00:01:60", "Corp", A.Sample(1.0, -91, -93, -92, None))
     radios = t.radios_on(5220)
-    assert {r.key for r in radios} == {"02:00:5e:00:01:c", "02:00:5e:00:01:6"}
+    assert {r.key for r in radios} == {"00:5e:00:01:c", "00:5e:00:01:6"}
     rc = next(r for r in radios if r.key.endswith(":c"))
     assert rc.bssids == {"02:00:5e:00:01:c0", "02:00:5e:00:01:c1", "02:00:5e:00:01:c2"}
     assert len(rc.samples) == 4
@@ -303,10 +303,10 @@ def test_attribute_names_matching_radio_with_numbers():
     assert len(out) == 1
     a = out[0]
     assert a.marker == A.MARK_OK
-    assert a.radio.key == "02:00:5e:00:01:c"
+    assert a.radio.key == "00:5e:00:01:c"
     assert a.radio.name() == "Corp +1"
     assert a.dist == pytest.approx(0.0, abs=1e-6)
-    assert a.runner_up.key == "02:00:5e:00:02:a"
+    assert a.runner_up.key == "00:5e:00:02:a"
     assert a.margin == pytest.approx(math.sqrt(3 * 64), abs=1e-6)
     assert a.fading_r > 0.99 and a.bins >= 10
     assert a.seq_pct == pytest.approx(1.0)
@@ -322,7 +322,7 @@ def test_attribute_returns_one_result_per_cluster():
     t.add_radio(5540, "02:00:5e:00:03:60", "Far", A.Sample(1.0, -91, -93, -92, None))
     t.add_radio(5540, "02:00:5e:00:03:60", "Far", A.Sample(2.0, -91, -93, -92, None))
     out = A.attribute(5540, "ff:ff:ff:ff:ff:ff", A.DEAUTH, t)
-    assert [a.radio.key for a in out] == ["02:00:5e:00:01:c", "02:00:5e:00:03:6"]
+    assert [a.radio.key for a in out] == ["00:5e:00:01:c", "00:5e:00:03:6"]
     assert out[0].rssi_mean > out[1].rssi_mean
 
 
@@ -341,7 +341,7 @@ def test_attribute_none_when_nearest_radio_is_far():
         t.add_radio(5320, "02:00:5e:00:01:c0", "Corp", A.Sample(i, -80, -82, -81, None))
     a = A.attribute(5320, "fe:ff:ff:ff:ff:ff", A.DEAUTH, t)[0]
     assert a.marker == A.MARK_NONE
-    assert a.radio.key == "02:00:5e:00:01:c"       # nearest is still reported
+    assert a.radio.key == "00:5e:00:01:c"       # nearest is still reported
     assert a.dist > A.DIST_NONE
 
 
@@ -357,7 +357,7 @@ def test_attribute_channel_covers_every_source_or_just_one():
     assert {(a.sa, a.subtype) for a in allk} == {("ff:ff:ff:ff:ff:ff", A.DEAUTH),
                                                   ("fe:ff:ff:ff:ff:ff", A.DISASSOC)}
     one = A.attribute_channel(5540, t, sa="fe:ff:ff:ff:ff:ff")
-    assert len(one) == 1 and one[0].radio.key == "02:00:5e:00:02:a"
+    assert len(one) == 1 and one[0].radio.key == "00:5e:00:02:a"
     assert A.attribute_channel(2437, t) == []
 
 
@@ -429,3 +429,53 @@ def test_hunt_line_none_names_nearest():
 def test_hunt_line_na():
     assert A.hunt_line(_attr(marker=A.MARK_NA)) == \
         "ATTRIBUTION   – no beacons heard on this channel yet"
+
+
+# ---- 7. offline ----
+
+def test_parse_pcap_line_fields_and_hex_ssid():
+    line = "|".join(["1756000000.5", "0x0008", "02:00:5e:00:01:c0", "02:00:5e:00:01:c0",
+                     "5540", "-59,-62,-61", "686", "436f7270"])
+    rec = A.parse_pcap_line(line)
+    assert rec == {"ts": 1756000000.5, "st": 8, "sa": "02:00:5e:00:01:c0",
+                   "bssid": "02:00:5e:00:01:c0", "freq": 5540,
+                   "chains": [-59, -62, -61], "seq": 686, "ssid": "Corp"}
+
+
+def test_parse_pcap_line_rejoins_pipe_in_ssid_and_handles_missing():
+    line = "|".join(["1.0", "8", "02:00:5e:00:01:c0", "02:00:5e:00:01:c0", "2437",
+                     "-50", "", "a|b"])
+    rec = A.parse_pcap_line(line)
+    assert rec["ssid"] == "a|b" and rec["seq"] is None
+    assert A.parse_pcap_line("too|short") is None
+    assert A.parse_pcap_line("|".join(["x", "8", "", "", "", "", "", ""])) is None
+
+
+PCAPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pcaps", "floor6")
+CH108 = os.path.join(PCAPS, "floor_6_channel_108.pcapng")
+CH44 = os.path.join(PCAPS, "floor_6_channel_44.pcapng")
+
+
+@pytest.mark.skipif(not os.path.exists(CH108), reason="local capture not present")
+def test_floor6_ch108_attributes_to_the_known_radio():
+    out = A.analyse_pcap(CH108, subtype=A.DEAUTH)
+    spoofed = [a for a in out if a.sa == "ff:ff:ff:ff:ff:ff"]
+    assert spoofed, "no spoofed-source deauths found on ch 108"
+    best = max(spoofed, key=lambda a: a.samples)
+    assert best.marker == A.MARK_OK, A.hunt_line(best)
+    assert best.radio.key.endswith("f1:79:4"), A.hunt_line(best)
+    assert best.margin is None or best.margin > 1.0
+    assert best.fading_r is not None and best.fading_r > 0.9
+    assert best.one_chain is False
+
+
+@pytest.mark.skipif(not os.path.exists(CH44), reason="local capture not present")
+def test_floor6_ch44_splits_into_two_radios():
+    out = A.analyse_pcap(CH44, subtype=A.DEAUTH)
+    spoofed = [a for a in out if a.sa == "ff:ff:ff:ff:ff:ff"]
+    assert len(spoofed) == 2, [A.hunt_line(a) for a in spoofed]
+    strong, weak = spoofed                     # strongest first
+    assert strong.rssi_mean > weak.rssi_mean
+    assert strong.radio.key.endswith("f1:8a:c"), A.hunt_line(strong)
+    assert weak.radio.key.endswith("f1:8a:6"), A.hunt_line(weak)
+    assert strong.marker == A.MARK_OK, A.hunt_line(strong)
