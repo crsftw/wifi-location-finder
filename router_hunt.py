@@ -613,7 +613,7 @@ def discover_select(stdscr, iface, cap, hopper, f2c, txguard):
 # Hunt screen
 # ==========================================================================
 
-def hunt(stdscr, iface, label, cap, txguard, args):
+def hunt(stdscr, iface, label, cap, txguard, args, attrib=None):
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.timeout(120)
@@ -629,6 +629,8 @@ def hunt(stdscr, iface, label, cap, txguard, args):
     last_dir = "→"
     last_geiger = 0.0
     frames = deque()          # ts of recent frames for frames/sec
+    attr_lines = []           # attribution.hunt_line() strings, refreshed once a second
+    last_attr = 0.0
 
     while True:
         now = time.time()
@@ -637,6 +639,10 @@ def hunt(stdscr, iface, label, cap, txguard, args):
                 rec = cap.q.get_nowait()
             except queue.Empty:
                 break
+            if attrib is not None:
+                feed_tracks(rec, attrib["tracks"])
+                if not is_target(rec, attrib["target"]):
+                    continue                     # a beacon: attribution only
             r = rec["rssi"]
             roll.append((rec["ts"], r))
             trend.add(rec["ts"], r)
@@ -656,6 +662,18 @@ def hunt(stdscr, iface, label, cap, txguard, args):
             if peak is None or avg > peak:
                 peak = avg
         fps = len(frames) / 3.0
+
+        if attrib is not None and now - last_attr >= 1.0:
+            attrs = attribution.attribute_channel(attrib["freq"], attrib["tracks"],
+                                                  sa=attrib["sa"])
+            attr_lines = [attribution.hunt_line(a) for a in attrs] or \
+                         [attribution.hunt_line(attribution.Attribution(
+                             freq=attrib["freq"], sa=attrib["sa"] or "", subtype=0,
+                             samples=0, rssi_mean=0.0, marker=attribution.MARK_NA,
+                             radio=None, dist=None, margin=None, runner_up=None,
+                             runner_dist=None, fading_r=None, bins=0, seq_pct=None,
+                             one_chain=False))]
+            last_attr = now
 
         # ---- trend -> beeps ----
         d = trend.delta(now)
@@ -693,6 +711,10 @@ def hunt(stdscr, iface, label, cap, txguard, args):
         stdscr.addnstr(1, 0, f"beep {audio}   "
                        f"p reset-peak   b beep on/off   q quit",
                        w - 1, curses.A_DIM)
+        if attr_lines:
+            stdscr.addnstr(2, 0, attr_lines[0], w - 1, curses.A_BOLD)
+            for i, extra in enumerate(attr_lines[1:3]):        # further clusters
+                stdscr.addnstr(12 + i, 0, extra, w - 1, curses.A_NORMAL)
 
         shown = f"{avg:.0f}" if avg is not None else "--"
         for i, rowtext in enumerate(big_digits(shown, scale=2)):

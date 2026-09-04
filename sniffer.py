@@ -412,28 +412,45 @@ def format_flood_row(r, oui, f2c):
 
 
 def resolve_target(t, f2c):
-    """Map a selection-screen target dict to (display_filter, label, freq, chan)."""
+    """Map a selection-screen target dict to
+    (display_filter, label, freq, chan, attrib_ctx).
+
+    attrib_ctx is the hunt screen's attribution context - the scan screen's
+    tracks, the MACs the meter follows (None = every deauth/disassoc), the
+    channel and the source - or None for a network hunt, where the target *is*
+    the beacons and attribution is meaningless. When there is a context the
+    filter also passes beacons so the attribution keeps learning while parked."""
     freq = t["freq"]
     chan = f2c.get(freq, 0)
     band = fmt_ghz(freq)
     ident = t.get("ident", "")
     who = f" [{ident}]" if ident else ""
     tail = f"(ch{chan} · {band})"
+    tracks = t.get("tracks")
+    wb = tracks is not None
+    ctx = None
     if t["kind"] == "net":
         dfilter, lbl = build_target_filter(bssids=t["bssids"])
         label = f"{lbl}{who}  {tail}"
     elif t["kind"] == "flood_src":
-        dfilter, _ = build_target_filter(sa=t["src"])
+        dfilter, _ = build_target_filter(sa=t["src"], with_beacons=wb)
         label = f"deauth src {t['src']}{who}  {tail}"
+        if wb:
+            ctx = {"tracks": tracks, "target": {t["src"]}, "freq": freq, "sa": t["src"]}
     elif t["kind"] == "flood_all":
-        dfilter = f"wlan.fc.type_subtype=={DEAUTH}"
-        label = f"ALL deauths  {tail}"
+        dfilter = f"wlan.fc.type_subtype=={DEAUTH} || wlan.fc.type_subtype=={DISASSOC}"
+        if wb:
+            dfilter = f"({dfilter}) || wlan.fc.type_subtype=={BEACON}"
+            ctx = {"tracks": tracks, "target": None, "freq": freq, "sa": None}
+        label = f"ALL floods  {tail}"
     elif t["kind"] == "mac":
-        dfilter, _ = build_target_filter(sa=t["mac"])
+        dfilter, _ = build_target_filter(sa=t["mac"], with_beacons=wb)
         label = f"MAC {t['mac']}{who}  {tail}"
+        if wb:
+            ctx = {"tracks": tracks, "target": {t["mac"]}, "freq": freq, "sa": t["mac"]}
     else:
         raise ValueError(f"unknown target kind {t['kind']!r}")
-    return dfilter, label, freq, chan
+    return dfilter, label, freq, chan, ctx
 
 
 # ==========================================================================
@@ -825,14 +842,14 @@ def main():
             print("done.")
             return
 
-        dfilter, label, freq, chan = resolve_target(target, f2c)
+        dfilter, label, freq, chan, attrib = resolve_target(target, f2c)
         if freq:
             set_channel(iface, chan or 0, freq)
         hcap = CaptureThread(iface, dfilter, HUNT_FIELDS, parse_hunt)
         hcap.start()
         directional_reminder()
         try:
-            curses.wrapper(hunt, iface, label, hcap, txguard, args)
+            curses.wrapper(hunt, iface, label, hcap, txguard, args, attrib)
         finally:
             hcap.stop()
         # loop back to a fresh scan/select screen

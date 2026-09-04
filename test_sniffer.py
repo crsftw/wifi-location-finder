@@ -382,6 +382,37 @@ def test_format_flood_row_real_source_shows_dash():
     assert s.startswith("  2.4GHz   6  deauth  ") and s.rstrip().endswith("–")
 
 
+# ---- hunt wiring ----
+
+def test_resolve_target_builds_attrib_context_for_flood_and_mac_only():
+    import attribution
+    tr = attribution.Tracks()
+    f2c = {5540: 108}
+    d, lbl, freq, ch, ctx = sniffer.resolve_target(
+        {"kind": "flood_src", "src": "ff:ff:ff:ff:ff:ff", "freq": 5540, "tracks": tr}, f2c)
+    assert d.endswith("|| wlan.fc.type_subtype==8") and ch == 108
+    assert ctx == {"tracks": tr, "target": {"ff:ff:ff:ff:ff:ff"}, "freq": 5540,
+                   "sa": "ff:ff:ff:ff:ff:ff"}
+
+    d, _, _, _, ctx = sniffer.resolve_target({"kind": "flood_all", "freq": 5540, "tracks": tr}, f2c)
+    assert d == "(wlan.fc.type_subtype==12 || wlan.fc.type_subtype==10) || wlan.fc.type_subtype==8"
+    assert ctx["target"] is None and ctx["sa"] is None
+
+    d, _, _, _, ctx = sniffer.resolve_target(
+        {"kind": "mac", "mac": "02:00:5e:00:09:01", "freq": 5540, "tracks": tr}, f2c)
+    assert ctx["target"] == {"02:00:5e:00:09:01"} and "type_subtype==8" in d
+
+    d, _, _, _, ctx = sniffer.resolve_target(
+        {"kind": "net", "bssids": {"02:00:5e:00:01:80"}, "freq": 5540}, f2c)
+    assert ctx is None and "type_subtype==8" not in d
+
+
+def test_resolve_target_without_tracks_gives_no_context():
+    d, _, _, _, ctx = sniffer.resolve_target(
+        {"kind": "flood_src", "src": "ff:ff:ff:ff:ff:ff", "freq": 5540}, {5540: 108})
+    assert ctx is None and "type_subtype==8" not in d
+
+
 # ---- hunt capture: fields, filter, track routing ----
 
 
