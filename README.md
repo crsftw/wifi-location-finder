@@ -168,12 +168,44 @@ multiple spoofed targets can only come from one radio.
 10–20 dB. This is mounted, plugged in, or sitting on a shelf — it will still be
 there when you arrive.
 
-It is *not* Cisco rogue containment: containment spoofs a rogue's BSSID to deauth
-its clients, whereas this spoofs a fake client to attack your own infrastructure.
+In `sniffer.py` this shows up in **DEAUTH FLOODS** on channel 64 with source
+`fe:ff:ff:ff:ff:ff`; hit ENTER on it (or on the `ALL deauths on ch 64` row) to
+direction-find it.
 
-In `sniffer.py` this attacker shows up in **DEAUTH FLOODS** on channel 64 with
-source `fe:ff:ff:ff:ff:ff`; hit ENTER on it (or on the `ALL deauths on ch 64` row)
-to direction-find it.
+### What the full-band sweeps found
+
+The original read of that capture was that it could not be rogue containment,
+on the grounds that containment spoofs a *rogue's* BSSID to deauth its clients
+whereas this spoofs a fake client to attack our own APs. **The full-band sweeps
+overturned that.** It is containment — just not from our own controller.
+
+`sweep5g.sh` captured all of 5 GHz on floor 6 (25 channels × 60 s, 2026-09-03)
+and floor 7. The floor-6 write-up is in
+[`pcaps/floor6/floor6-analysis.md`](pcaps/floor6/floor6-analysis.md); the summary:
+
+- **8,517 forged deauths** across 8 of 25 channels, all with source
+  `ff:ff:ff:ff:ff:ff` and reason code 7. Every target is a Cisco `-SITE` BSSID:
+  71 target BSSIDs on 33 physical SR access points.
+- **Every source is a neighbouring Meraki radio** — 9 radios on 5 physical APs
+  broadcasting the `NEIGHBOR-*` SSID set, matched by clustering the forged frames on
+  their `[combined, ant A, ant B]` signal vector and correlating fading against
+  every AP beaconing on that channel. Matches land within 0.02–0.17 dB with the
+  nearest non-NEIGHBOR candidate 1–10 dB away, and the `8c:88:81` OUI is a burned-in
+  Cisco Meraki address, so the vendor is read off the wire rather than guessed.
+  The transmitter address in the frames is still spoofed — the attribution is
+  physical-layer inference, strong but not a signed confession.
+- **`MODERN-SITE` is never targeted** on any channel, despite beaconing on all of
+  them alongside the SSIDs that are. It is the one SSID advertising 802.1X plus
+  802.1X-SHA256 (`akm=1,5`).
+
+So there is no hidden gadget on a shelf: it is a neighbouring Meraki deployment
+classifying the site network as rogue and containing it, from mains-powered ceiling
+APs. That is consistent with the origin capture's σ of 1.25 dB — mounted and
+stationary, as predicted, just not the sort of device we expected to find.
+
+The direction-finding tools still apply: a sweep tells you *which* radios and
+*which* channels, and `sniffer.py` walks you to the specific AP if you need to
+put a hand on it.
 
 ## Receive-only, and provably so
 
@@ -214,10 +246,12 @@ retunes the receiver with `iw`; retuning is not transmitting.
 | `sniffer.py` | **All-in-one DF:** networks (collapsed to one row per device) / deauth floods / probe clients / a specific MAC → shared RSSI hunt. Vendor + device + pwnagotchi/deauther badges + PHY class, and adaptive channel hopping |
 | `device_id.py` | Passive device identification: OUI→vendor, randomized-MAC flag, WPS/role device guess, pwnagotchi/deauther badge, PHY-capability fingerprint (standalone, unit-tested) |
 | `deauth_sweep.py` | Sweep every 2.4/5 GHz channel and report **which channel** a deauth flood is on, so you know where to hunt |
+| `sweep5g.sh` | **Offline sweep:** park on every 5 GHz channel in turn and write one pcapng per channel, per floor — for analysis afterwards rather than live hunting |
 | `router_hunt.py` | Discover networks and direction-find one (the discovery + hunt engine `sniffer.py` builds on; usable standalone). Also holds the adaptive-hopping scheduler |
 | `deauth_hunt.py` | Single-channel RSSI meter with **waypoint recorder, SQLite log, and web dashboard** — for logged, methodical building sweeps once you know the channel |
 | `init-hunt.sh` | Card setup: regdomain, monitor mode, channel, chain constraint, capture verification |
 | `hunt.db` | SQLite: every sample plus your marked waypoints (written by `deauth_hunt.py`) |
+| `pcaps/` | Sweep output: `floor<N>/floor_<N>_channel_<CH>.pcapng` plus the run log and the written-up analysis. The pcapngs are **not** in git (hundreds of MB per sweep); the logs and analysis are |
 | `old_scripts/antenna-check.sh` | Pre-hunt antenna test: live signal swing, per-chain RSSI probe (receive-only) |
 | `old_scripts/make_test_capture.py` | Synthesises a pcap with the exact signature, for off-site validation |
 
@@ -234,6 +268,10 @@ multi-BSSID collapse, adaptive-hop scheduling) is unit-tested — run **`pytest`
 - **Just want to know which channel the flood is on** → `sudo ./deauth_sweep.py`.
 - **Know the channel and want a logged, floor-by-floor sweep with waypoints and a
   web view** → `deauth_hunt.py` (below).
+- **Want the whole band on disk to pick apart later** → `./sweep5g.sh` (below).
+  Live tools hop and therefore miss things; a sweep captures each channel in full
+  for 60 s, which is what the attribution work in `pcaps/floor6/floor6-analysis.md`
+  needed.
 
 ## `deauth_hunt.py` — logged single-channel hunt
 
@@ -283,6 +321,51 @@ SELECT datetime(ts,'unixepoch'), rssi FROM sample WHERE floor='2' ORDER BY ts;
 SELECT da, COUNT(*) FROM sample GROUP BY da ORDER BY 2 DESC;
 ```
 
+## `sweep5g.sh` — capture the whole 5 GHz band to disk
+
+The live tools hop, so they sample each channel a fraction of the time and lose
+whatever happened while they were elsewhere. `sweep5g.sh` does the opposite: it
+parks on one channel, captures it in full for a fixed dwell, moves on, and leaves
+you a pcapng per channel to analyse offline.
+
+```bash
+sudo ./sweep5g.sh                                  # asks which floor you're on
+FLOOR=6 DWELL=60 ./sweep5g.sh                      # non-interactive
+DWELL=5 CHANNELS="36 44" FLOOR=0 ./sweep5g.sh      # quick smoke test
+```
+
+It walks all 30 channel numbers the standard defines in 5 GHz — deliberately
+including 68, 96, 144 and 169–177, which sit outside the usual UK allocation.
+Channels the adapter's regulatory domain refuses are reported at the end rather
+than silently skipped, so the coverage gap is explicit in the log.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `IFACE` | `wlan1` | monitor-mode interface (it refuses to run if the mode is anything else) |
+| `DWELL` | `60` | seconds per channel — 30 channels × 60 s ≈ 30 min |
+| `PCAP_ROOT` | `./pcaps` | output root |
+| `CHANNELS` | all 30 | space-separated subset |
+| `FLOOR` | *prompts* | integer, names the output directory |
+
+Output lands in `pcaps/floor<N>/floor_<N>_channel_<CH>.pcapng`. On exit — including
+Ctrl-C, which keeps everything captured so far — it prints a per-channel summary of
+packets, beacons, **spoofed deauths** (`wlan.ta == ff:ff:ff:ff:ff:ff`) and file size,
+which is usually enough on its own to tell you which channels are worth opening.
+Save that summary next to the captures; `pcaps/capture_log_floor6.txt` and
+`pcaps/capture_log_floor7.txt` are the ones from the sweeps analysed below.
+
+Like everything else here it is **receive-only**: the only things it does to the
+radio are `iw dev … set channel` (retunes the receiver) and `dumpcap` (captures).
+It never scans, associates or injects. It also verifies that each retune actually
+took before capturing, so a channel the driver silently ignored can't be recorded
+as if it were a different one.
+
+**Analysing the result.** With the whole band on disk you can attribute frames
+rather than just detect them — cluster the forged deauths on a channel by their
+signal vector (`[combined, antenna A, antenna B]`), correlate their fading against
+every AP beaconing on that channel, and the transmitter falls out.
+`pcaps/floor6/floor6-analysis.md` is a worked example of exactly that.
+
 ## Field procedure
 
 **Before you go.** Get the physical locations of the targeted APs from the
@@ -321,5 +404,18 @@ sudo ip link set wlan1 down && sudo iw dev wlan1 set type managed && sudo ip lin
 
 These frames claim to come from an unassociated station. With **PMF / 802.11w**
 enabled on the affected SSIDs, the APs ignore them outright and the disruption
-stops — whether or not the device is ever found. That change needs whoever owns
+stops — whether or not the emitter is ever found. That change needs whoever owns
 the Cisco controller, so it's worth starting in parallel with the search.
+
+The floor-6 sweep sharpens what "enable PMF" has to mean here. The
+**MFP-capable flag alone is not enough**: `WORKPLACE-SITE`'s PMF-capable BSSIDs
+(`akm=1,3`, 802.1X + FT) were still hit 610 times across 5 BSSIDs. The only SSID
+never touched on any channel is `MODERN-SITE`, which advertises `akm=1,5` —
+802.1X **plus 802.1X-SHA256**. Whatever decides to skip a BSSID is tracking the
+SHA-256/WPA3-class suite, not the capability bit, so the target configuration is
+MODERN-SITE's, not merely "PMF ticked".
+
+The other half of the fix is on the *other* side: the containing radios belong to
+a neighbouring Meraki network, so someone with access to that dashboard can turn
+its rogue containment off, or stop it classifying the site APs as rogues. Either
+end alone ends the disruption.
