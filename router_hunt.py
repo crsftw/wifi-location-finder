@@ -51,6 +51,7 @@ from deauth_hunt import (big_digits, SPARK, RSSI_FLOOR, RSSI_CEIL, TxGuard,
                          init_gradient, draw_gradient_bar)
 from deauth_sweep import (detect_iface, iface_phy, iface_mode,
                           read_tx_packets, list_channels, set_channel)
+import attribution
 
 BEACON = 8
 PROBE_RESP = 5
@@ -169,27 +170,56 @@ def parse_disc(line):
             "rssi": first_int(sig), "priv": norm_priv(priv), "ssid": ssid}
 
 
-# ---- hunt: frames transmitted BY the target ----
-HUNT_FIELDS = ["frame.time_epoch", "wlan.sa", "wlan.ta",
-               "radiotap.channel.freq", "radiotap.dbm_antsignal"]
+# ---- hunt: frames transmitted BY the target, plus (optionally) beacons ----
+# SSID last: it may contain '|'. The timestamp, subtype, BSSID, per-chain RSSI
+# and sequence number feed flood attribution (attribution.py) while hunting;
+# the RSSI meter itself reads only "rssi".
+HUNT_FIELDS = ["frame.time_epoch", "wlan.fc.type_subtype", "wlan.sa", "wlan.ta",
+               "wlan.bssid", "radiotap.channel.freq", "radiotap.dbm_antsignal",
+               "wlan.seq", "wlan.ssid"]
+_N_HUNT_FIXED = len(HUNT_FIELDS) - 1
 
 
 def parse_hunt(line):
     parts = line.split("|")
     if len(parts) < len(HUNT_FIELDS):
         return None
-    ts, sa, ta, freq, sig = parts[:5]
+    ts, st, sa, ta, bssid, freq, sig, seq = parts[:_N_HUNT_FIXED]
     try:
         ts = float(ts)
     except ValueError:
         return None
-    rssi = first_int(sig)
-    if rssi is None:
+    chains = attribution.parse_chains(sig)
+    if not chains:
         return None
-    return {"ts": ts, "rssi": rssi,
+    return {"ts": ts, "rssi": chains[0], "chains": chains,
+            "st": first_int(st),
             "sa": sa.split(",")[0].strip().lower(),
             "ta": ta.split(",")[0].strip().lower(),
-            "freq": first_int(freq)}
+            "bssid": bssid.split(",")[0].strip().lower(),
+            "freq": first_int(freq), "seq": first_int(seq),
+            "ssid": decode_ssid("|".join(parts[_N_HUNT_FIXED:]))}
+
+
+def is_target(rec, target):
+    """Does this hunt-capture record belong to the RSSI meter? `target` is the
+    set of MACs being hunted, or None for 'every deauth/disassoc on the channel'."""
+    if target is None:
+        return rec["st"] in (attribution.DEAUTH, attribution.DISASSOC)
+    return rec["sa"] in target or rec["ta"] in target
+
+
+def feed_tracks(rec, tracks):
+    """Route one hunt-capture record into the attribution tracks: beacons to
+    their radio, spoofed-source deauth/disassoc to their flood."""
+    if not rec["freq"]:
+        return
+    sample = attribution.make_sample(rec["ts"], rec["chains"], rec["seq"])
+    if rec["st"] == attribution.BEACON and rec["bssid"]:
+        tracks.add_radio(rec["freq"], rec["bssid"], rec["ssid"], sample)
+    elif rec["st"] in (attribution.DEAUTH, attribution.DISASSOC):
+        if rec["sa"] and rec["sa"] not in tracks.bssids:
+            tracks.add_source(rec["freq"], rec["sa"], rec["st"], sample)
 
 
 # ==========================================================================
@@ -713,16 +743,21 @@ def hunt(stdscr, iface, label, cap, txguard, args):
 # Main
 # ==========================================================================
 
-def build_target_filter(bssids=None, sa=None):
+def build_target_filter(bssids=None, sa=None, with_beacons=False):
+    """Display filter for frames sent by the target. with_beacons also passes
+    every beacon on the channel - they feed attribution, never the meter."""
     if sa:
         m = sa.lower()
-        return f"wlan.sa=={m} || wlan.ta=={m}", sa
-    terms = []
-    for b in bssids:
-        terms.append(f"wlan.sa=={b}")
-        terms.append(f"wlan.ta=={b}")
-    label = ", ".join(sorted(bssids))
-    return " || ".join(terms), label
+        core, label = f"wlan.sa=={m} || wlan.ta=={m}", sa
+    else:
+        terms = []
+        for b in bssids:
+            terms.append(f"wlan.sa=={b}")
+            terms.append(f"wlan.ta=={b}")
+        core, label = " || ".join(terms), ", ".join(sorted(bssids))
+    if with_beacons:
+        return f"({core}) || wlan.fc.type_subtype=={attribution.BEACON}", label
+    return core, label
 
 
 def valid_mac(s):

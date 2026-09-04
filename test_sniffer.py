@@ -7,6 +7,7 @@ Aggregator path (no radio, no curses). Run: pytest test_sniffer.py
 import sniffer
 import pytest
 import device_id
+import router_hunt
 
 OUI = device_id.load_oui()
 
@@ -379,3 +380,69 @@ def test_format_flood_row_real_source_shows_dash():
          "type": "deauth", "rate": 0.2, "rssi": -71, "flood": False, "attrib": None}
     s = sniffer.format_flood_row(r, OUI, F2C)
     assert s.startswith("  2.4GHz   6  deauth  ") and s.rstrip().endswith("–")
+
+
+# ---- hunt capture: fields, filter, track routing ----
+
+
+def hunt_line(st, sa, ta, bssid, freq, sig="-50", seq="", ssid="", ts="1000.0"):
+    return "|".join([ts, str(st), sa, ta, bssid, str(freq), sig, seq, ssid])
+
+
+def test_parse_hunt_keeps_everything_attribution_needs():
+    rec = router_hunt.parse_hunt(hunt_line(12, "ff:ff:ff:ff:ff:ff", "ff:ff:ff:ff:ff:ff",
+                                           "02:00:5e:00:01:8c", 5540, "-59,-62,-61", "686"))
+    assert rec["rssi"] == -59 and rec["chains"] == [-59, -62, -61]
+    assert rec["st"] == 12 and rec["seq"] == 686 and rec["ts"] == 1000.0
+    assert rec["bssid"] == "02:00:5e:00:01:8c" and rec["ssid"] == ""
+
+
+def test_parse_hunt_decodes_ssid_tail_with_pipe():
+    rec = router_hunt.parse_hunt(hunt_line(8, "02:00:5e:00:01:c0", "02:00:5e:00:01:c0",
+                                           "02:00:5e:00:01:c0", 5540, ssid="a|b"))
+    assert rec["ssid"] == "a|b"
+    assert router_hunt.parse_hunt("x|8|a|b|c|5540|-50|1|s") is None     # bad ts
+    assert router_hunt.parse_hunt(hunt_line(8, "a", "b", "c", 5540, sig="")) is None  # no rssi
+
+
+def test_hunt_fields_order_matches_parser():
+    assert router_hunt.HUNT_FIELDS == ["frame.time_epoch", "wlan.fc.type_subtype",
+                                       "wlan.sa", "wlan.ta", "wlan.bssid",
+                                       "radiotap.channel.freq", "radiotap.dbm_antsignal",
+                                       "wlan.seq", "wlan.ssid"]
+
+
+def test_build_target_filter_optionally_adds_beacons():
+    f, lbl = router_hunt.build_target_filter(sa="ff:ff:ff:ff:ff:ff")
+    assert f == "wlan.sa==ff:ff:ff:ff:ff:ff || wlan.ta==ff:ff:ff:ff:ff:ff"
+    f2, _ = router_hunt.build_target_filter(sa="ff:ff:ff:ff:ff:ff", with_beacons=True)
+    assert f2 == "(wlan.sa==ff:ff:ff:ff:ff:ff || wlan.ta==ff:ff:ff:ff:ff:ff) || wlan.fc.type_subtype==8"
+    f3, lbl3 = router_hunt.build_target_filter(bssids={"02:00:5e:00:01:80"}, with_beacons=True)
+    assert f3.endswith(") || wlan.fc.type_subtype==8") and lbl3 == "02:00:5e:00:01:80"
+
+
+def test_is_target_with_set_and_with_none():
+    d = router_hunt.parse_hunt(hunt_line(12, "ff:ff:ff:ff:ff:ff", "ff:ff:ff:ff:ff:ff", "x", 5540))
+    b = router_hunt.parse_hunt(hunt_line(8, "02:00:5e:00:01:c0", "02:00:5e:00:01:c0",
+                                         "02:00:5e:00:01:c0", 5540))
+    assert router_hunt.is_target(d, {"ff:ff:ff:ff:ff:ff"}) is True
+    assert router_hunt.is_target(b, {"ff:ff:ff:ff:ff:ff"}) is False
+    assert router_hunt.is_target(d, None) is True          # ALL floods on the channel
+    assert router_hunt.is_target(b, None) is False         # a beacon is never the target
+
+
+def test_feed_tracks_routes_beacons_and_spoofed_floods():
+    import attribution
+    t = attribution.Tracks()
+    b = router_hunt.parse_hunt(hunt_line(8, "02:00:5e:00:01:c0", "02:00:5e:00:01:c0",
+                                         "02:00:5e:00:01:c0", 5540, "-59,-62,-61", ssid="436f7270"))
+    d = router_hunt.parse_hunt(hunt_line(12, "ff:ff:ff:ff:ff:ff", "ff:ff:ff:ff:ff:ff",
+                                         "02:00:5e:00:01:c0", 5540, "-59,-62,-61", "686"))
+    real = router_hunt.parse_hunt(hunt_line(12, "02:00:5e:00:01:c0", "02:00:5e:00:01:c0",
+                                            "02:00:5e:00:01:c0", 5540, "-59,-62,-61", "7"))
+    for rec in (b, d, real):
+        router_hunt.feed_tracks(rec, t)
+    assert [r.key for r in t.radios_on(5540)] == ["00:5e:00:01:c"]
+    assert t.radios_on(5540)[0].name() == "Corp"
+    assert len(t.source(5540, "ff:ff:ff:ff:ff:ff", 12)) == 1
+    assert t.source(5540, "02:00:5e:00:01:c0", 12) == []
