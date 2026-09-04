@@ -339,3 +339,43 @@ def test_two_rssi_clusters_from_one_spoofed_source_are_two_rows():
 def test_tracks_use_frame_timestamp_not_drain_time():
     agg = feed([_flood("ff:ff:ff:ff:ff:ff", 5540, "-59", 1234.5, 1)], now=9999.0)
     assert agg.tracks.source(5540, "ff:ff:ff:ff:ff:ff", 12)[0].ts == 1234.5
+
+
+# ---- MGMT FLOODS rendering ----
+
+F2C = {5540: 108, 2437: 6}
+
+
+def test_mode_renamed_to_mgmt_floods():
+    assert sniffer.MODE_NAMES[1] == "MGMT FLOODS"
+
+
+def test_format_flood_row_all_row():
+    r = {"kind": "all", "freq": 5540, "src": None, "st": None, "type": "",
+         "rate": 12.4, "rssi": None, "flood": True, "attrib": None}
+    s = sniffer.format_flood_row(r, OUI, F2C)
+    assert s.startswith("⚑ 5.5GHz 108  ")
+    assert "ALL floods on ch" in s and s.rstrip().endswith("–")
+
+
+def test_format_flood_row_spoofed_with_attribution():
+    ls = []
+    for i in range(40):
+        ts = 1000 + i * 0.5
+        ls.append(_flood("ff:ff:ff:ff:ff:ff", 5540, "-59,-62,-61", ts, 600 + i))
+        ls.append(_beacon("02:00:5e:00:01:c0", 5540, "-59,-62,-61", "436f7270", ts))
+        ls.append(_beacon("02:00:5e:00:02:a0", 5540, "-67,-70,-69", "4f74686572", ts))
+    agg = feed(ls, now=1020.0)
+    r = [x for x in agg.flood_rows(now=1020.0, rate_threshold=2.0) if x["kind"] == "src"][0]
+    s = sniffer.format_flood_row(r, OUI, F2C)
+    assert "deauth" in s and "ff:ff:ff:ff:ff:ff" in s and "⚠ deauther?" in s
+    assert s.rstrip().endswith(sniffer.attribution.short_label(r["attrib"]))
+    assert "VENDOR" not in sniffer.FLOOD_HEADER and "LIKELY SOURCE" in sniffer.FLOOD_HEADER
+    assert "TYPE" in sniffer.FLOOD_HEADER
+
+
+def test_format_flood_row_real_source_shows_dash():
+    r = {"kind": "src", "freq": 2437, "src": "02:00:5e:00:01:c0", "st": 12,
+         "type": "deauth", "rate": 0.2, "rssi": -71, "flood": False, "attrib": None}
+    s = sniffer.format_flood_row(r, OUI, F2C)
+    assert s.startswith("  2.4GHz   6  deauth  ") and s.rstrip().endswith("–")

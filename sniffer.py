@@ -8,9 +8,9 @@ the S key:
 
   1. NETWORKS      - APs heard (hidden ones included), collapsed to one row per
                      physical radio by default (g toggles per-SSID).
-  2. DEAUTH FLOODS - channels under a deauthentication flood, ranked by rate,
-                     with a "all deauths on ch N" row for spoofed/randomised
-                     sources.
+  2. MGMT FLOODS   - channels under a deauth/disassoc flood, ranked by rate,
+                     with a LIKELY SOURCE column naming the beaconing radio
+                     whose signal matches each spoofed source (attribution.py).
   3. PROBE CLIENTS - client devices heard probing, with the named networks each
                      is searching for (its saved-network list).
   4. TRACK MAC     - type a MAC; it is auto-located by channel-hopping, then
@@ -387,6 +387,30 @@ def identity_str(mac, oui, net=None, role="", is_flood=False, is_pwn=False):
     return " · ".join(out)
 
 
+# ==========================================================================
+# MGMT FLOODS rendering (module-level so it is testable without curses)
+# ==========================================================================
+
+FLOOD_HEADER = (f"    {'GHz':>6} {'ch':>3}  {'TYPE':<8} {'SOURCE':<17} "
+                f"{'DEVICE':<14} {'f/s':>6} {'RSSI':>5}  LIKELY SOURCE")
+
+
+def format_flood_row(r, oui, f2c):
+    """One MGMT FLOODS line. VENDOR is folded into DEVICE here (a spoofed
+    source has none), which pays for the LIKELY SOURCE column."""
+    flag = "⚑" if r["flood"] else " "
+    if r["kind"] == "all":
+        who, dev, rssi, likely = "ALL floods on ch", "", "   -", attribution.MARK_NA
+    else:
+        who = r["src"]
+        dev = device_or_badge(r["src"], oui, role="attacker", is_flood=r["flood"])
+        rssi = f"{r['rssi']:>5}" if r["rssi"] is not None else "   -"
+        likely = attribution.short_label(r["attrib"]) if r["attrib"] else attribution.MARK_NA
+    return (f"{flag} {fmt_ghz(r['freq']):>6} {f2c.get(r['freq'], '?'):>3}  "
+            f"{r['type']:<8.8} {who:<17.17} {dev:<14.14} "
+            f"{r['rate']:>6.1f} {rssi:>5}  {likely}")
+
+
 def resolve_target(t, f2c):
     """Map a selection-screen target dict to (display_filter, label, freq, chan)."""
     freq = t["freq"]
@@ -417,7 +441,7 @@ def resolve_target(t, f2c):
 # ==========================================================================
 
 MODE_NET, MODE_FLOOD, MODE_PROBE, MODE_MAC = 0, 1, 2, 3
-MODE_NAMES = ["NETWORKS", "DEAUTH FLOODS", "PROBE CLIENTS", "TRACK MAC"]
+MODE_NAMES = ["NETWORKS", "MGMT FLOODS", "PROBE CLIENTS", "TRACK MAC"]
 N_MODES = len(MODE_NAMES)
 MAC_CHARS = set("0123456789abcdefABCDEF:")
 
@@ -452,7 +476,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
         # auto-locate: as soon as the typed MAC is heard, hunt it
         if locating and locating in agg.seen_ch:
             return {"kind": "mac", "mac": locating, "freq": agg.seen_ch[locating],
-                    "ident": identity_str(locating, oui)}
+                    "ident": identity_str(locating, oui), "tracks": agg.tracks}
 
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -520,28 +544,13 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
         elif mode == MODE_FLOOD:
             rows = agg.flood_rows(now, args.rate)
             cur_flood = max(0, min(cur_flood, len(rows) - 1)) if rows else 0
-            stdscr.addnstr(3, 0, "UP/DOWN move  ENTER hunt  "
-                           "(⚑ = flood; 'all' row tracks every deauth on that ch)",
+            stdscr.addnstr(3, 0, "UP/DOWN move  ENTER hunt  (⚑ = flood; 'all' row "
+                           "tracks every deauth/disassoc on that ch; "
+                           "✓ ? ✗ = attribution confidence)",
                            w - 1, curses.A_DIM)
-            hdr = (f"    {'GHz':>6} {'ch':>3}  {'source':<17} "
-                   f"{'VENDOR':<12} {'DEVICE':<14} {'d/s':>6} {'RSSI':>5}")
-            stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
-
-            def flood_line(r):
-                flag = "⚑" if r["flood"] else " "
-                if r["kind"] == "all":
-                    who, vend, dev = "ALL deauths on ch", "", ""
-                    rssi = "   -"
-                else:
-                    who = r["src"]
-                    vend = vendor_cell(r["src"], oui)
-                    dev = device_or_badge(r["src"], oui, role="attacker",
-                                          is_flood=r["flood"])
-                    rssi = f"{r['rssi']:>5}" if r["rssi"] is not None else "   -"
-                return (f"{flag} {fmt_ghz(r['freq']):>6} {f2c.get(r['freq'],'?'):>3}  "
-                        f"{who:<17.17} {vend:<12.12} {dev:<14.14} "
-                        f"{r['rate']:>6.1f} {rssi:>5}")
-            _draw_list(stdscr, 5, h - 6, rows, cur_flood, flood_line,
+            stdscr.addnstr(4, 0, FLOOD_HEADER, w - 1, curses.A_UNDERLINE)
+            _draw_list(stdscr, 5, h - 6, rows, cur_flood,
+                       lambda r: format_flood_row(r, oui, f2c),
                        dim=lambda r: not r["flood"], w=w)
 
         elif mode == MODE_PROBE:
@@ -579,6 +588,15 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                                "tracked as a transmitter)", w - 1, curses.A_DIM)
                 if mac_error:
                     stdscr.addnstr(7, 2, mac_error, w - 1, curses.A_BOLD)
+                m = mac_input.strip().lower()
+                if valid_mac(m):
+                    hits = [r for r in agg.flood_rows(now, args.rate)
+                            if r["kind"] == "src" and r["src"] == m and r["attrib"]]
+                    for i, r in enumerate(hits[:3]):
+                        stdscr.addnstr(9 + i, 2,
+                                       f"flooding on ch{f2c.get(r['freq'], '?')}: "
+                                       f"{attribution.short_label(r['attrib'])}",
+                                       w - 3, curses.A_BOLD)
 
         if cap.error:
             stdscr.addnstr(h - 1, 0, f"capture error: {cap.error}", w - 1, curses.A_BOLD)
@@ -604,7 +622,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                     mac_error = f"not a valid MAC: {mac_input!r}"
                 elif m in agg.seen_ch:
                     return {"kind": "mac", "mac": m, "freq": agg.seen_ch[m],
-                            "ident": identity_str(m, oui)}
+                            "ident": identity_str(m, oui), "tracks": agg.tracks}
                 else:
                     locating = m
                     mac_error = ""
@@ -681,17 +699,19 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                     continue
                 r = rows[cur_flood]
                 if r["kind"] == "all":
-                    return {"kind": "flood_all", "freq": r["freq"]}
+                    return {"kind": "flood_all", "freq": r["freq"], "tracks": agg.tracks}
                 return {"kind": "flood_src", "src": r["src"], "freq": r["freq"],
                         "ident": identity_str(r["src"], oui, role="attacker",
-                                              is_flood=r["flood"])}
+                                              is_flood=r["flood"]),
+                        "tracks": agg.tracks}
             elif mode == MODE_PROBE:
                 rows = agg.client_rows()
                 if not rows:
                     continue
                 r = rows[cur_probe]
                 return {"kind": "mac", "mac": r["mac"], "freq": r["freq"],
-                        "ident": identity_str(r["mac"], oui, net=r, role="client")}
+                        "ident": identity_str(r["mac"], oui, net=r, role="client"),
+                        "tracks": agg.tracks}
 
 
 def _draw_list(stdscr, top, maxrows, rows, cursor, line_fn, dim, w):
