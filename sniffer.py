@@ -146,6 +146,7 @@ class Aggregator:
         self.clients = {}         # client mac -> record (probe-request view)
         self.freq_ts = {}         # freq -> deque[ts]  (all frames, for adaptive hopping)
         self.tracks = attribution.Tracks()   # per-frame RSSI history for attribution
+        self._attrib_cache = {}   # (freq, src, st) -> (computed_at, [Attribution]), 1 s TTL
 
     def add(self, rec, now=None):
         now = time.time() if now is None else now
@@ -296,12 +297,24 @@ class Aggregator:
             g["n_bssids"] = len(g["bssids"])
         return sorted(groups.values(), key=lambda r: r["rssi"], reverse=True)
 
+    def _attribs(self, freq, src, st, now):
+        """attribute() is expensive and flood_rows() is called every render
+        tick (twice, in TRACK MAC mode) - cache it for 1 s, like hunt()
+        already does for its own attribution line."""
+        hit = self._attrib_cache.get((freq, src, st))
+        if hit and now - hit[0] < 1.0:
+            return hit[1]
+        attrs = attribution.attribute(freq, src, st, self.tracks)
+        self._attrib_cache[(freq, src, st)] = (now, attrs)
+        return attrs
+
     def flood_rows(self, now=None, rate_threshold=2.0):
         """Rows for the MGMT FLOODS view: an 'all floods on ch N' row per
         active channel, plus a per-source row - or one row per RSSI cluster
         when a spoofed source turns out to be several radios - hottest
         channel first."""
         now = time.time() if now is None else now
+        self.tracks.evict(now)
         w = self.flood_window
         chan_rate = {}
         for freq, dq in self.chan_ts.items():
@@ -321,7 +334,7 @@ class Aggregator:
             flood = rate >= rate_threshold
             base = {"kind": "src", "freq": freq, "src": src, "st": st,
                     "type": attribution.TYPE_NAMES.get(st, str(st)), "flood": flood}
-            attrs = attribution.attribute(freq, src, st, self.tracks)
+            attrs = self._attribs(freq, src, st, now)
             if not attrs:
                 rows.append({**base, "rate": rate,
                              "rssi": self.deauth_rssi.get((freq, src, st)),

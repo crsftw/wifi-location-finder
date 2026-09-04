@@ -664,15 +664,10 @@ def hunt(stdscr, iface, label, cap, txguard, args, attrib=None):
         fps = len(frames) / 3.0
 
         if attrib is not None and now - last_attr >= 1.0:
+            attrib["tracks"].evict(now)
             attrs = attribution.attribute_channel(attrib["freq"], attrib["tracks"],
                                                   sa=attrib["sa"])
-            attr_lines = [attribution.hunt_line(a) for a in attrs] or \
-                         [attribution.hunt_line(attribution.Attribution(
-                             freq=attrib["freq"], sa=attrib["sa"] or "", subtype=0,
-                             samples=0, rssi_mean=0.0, marker=attribution.MARK_NA,
-                             radio=None, dist=None, margin=None, runner_up=None,
-                             runner_dist=None, fading_r=None, bins=0, seq_pct=None,
-                             one_chain=False))]
+            attr_lines = [attribution.hunt_line(a) for a in attrs]
             last_attr = now
 
         # ---- trend -> beeps ----

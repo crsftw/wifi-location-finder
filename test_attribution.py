@@ -51,6 +51,26 @@ def test_tracks_evict_samples_older_than_window():
     assert seqs == [2, 3]          # ts=0 fell out of the 60 s window ending at 61
 
 
+def test_evict_drops_a_source_whose_newest_sample_is_stale():
+    t = A.Tracks(window=60.0)
+    for i in range(20):
+        t.add_source(5540, "ff:ff:ff:ff:ff:ff", A.DEAUTH, A.Sample(100.0 + i, -60, None, None, i))
+    t.evict(now=150.0)
+    assert t.source_keys(5540) == [(5540, "ff:ff:ff:ff:ff:ff", A.DEAUTH)]   # newest is 119 > 90
+    t.evict(now=200.0)
+    assert t.source_keys(5540) == []                                        # all older than 140
+    assert A.attribute_channel(5540, t) == []
+
+
+def test_evict_trims_radio_samples_but_keeps_the_radio():
+    t = A.Tracks(window=60.0)
+    for i in range(20):
+        t.add_radio(5540, "02:00:5e:00:01:c0", "Corp", A.Sample(100.0 + i, -60, -62, -61, None))
+    t.evict(now=200.0)
+    radios = t.radios_on(5540)
+    assert len(radios) == 1 and radios[0].samples == A.deque() and radios[0].name() == "Corp"
+
+
 def test_tracks_group_beacons_per_radio_and_remember_bssids():
     t = A.Tracks()
     for last, ssid in (("c0", "Corp"), ("c1", "Guest"), ("c2", ""), ("c1", "Guest")):
@@ -464,7 +484,7 @@ def test_floor6_ch108_attributes_to_the_known_radio():
     best = max(spoofed, key=lambda a: a.samples)
     assert best.marker == A.MARK_OK, A.hunt_line(best)
     assert best.radio.key.endswith("f1:79:4"), A.hunt_line(best)
-    assert best.margin is None or best.margin > 1.0
+    assert best.margin > 1.0
     assert best.fading_r is not None and best.fading_r > 0.9
     assert best.one_chain is False
 

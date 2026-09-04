@@ -342,6 +342,36 @@ def test_tracks_use_frame_timestamp_not_drain_time():
     assert agg.tracks.source(5540, "ff:ff:ff:ff:ff:ff", 12)[0].ts == 1234.5
 
 
+def test_flood_rows_evicts_a_source_that_has_gone_stale():
+    ls = [_flood("ff:ff:ff:ff:ff:ff", 5540, "-59,-62,-61", 1000 + i * 0.1, i) for i in range(20)]
+    agg = feed(ls, now=1000.0)
+    rows = [r for r in agg.flood_rows(now=1100.0) if r["kind"] == "src"]
+    assert not any(r["src"] == "ff:ff:ff:ff:ff:ff" for r in rows)
+    assert agg.tracks.source_keys(5540) == []
+
+
+def test_flood_rows_caches_attribution_for_one_second():
+    ls = []
+    for i in range(40):
+        ts = 1000 + i * 0.5
+        ls.append(_flood("ff:ff:ff:ff:ff:ff", 5540, "-59,-62,-61", ts, 600 + i))
+        ls.append(_beacon("02:00:5e:00:01:c0", 5540, "-59,-62,-61", "436f7270", ts))
+        ls.append(_beacon("02:00:5e:00:02:a0", 5540, "-67,-70,-69", "4f74686572", ts))
+    agg = feed(ls, now=1020.0)
+    r1 = [x for x in agg.flood_rows(now=1020.0, rate_threshold=2.0) if x["kind"] == "src"][0]
+    r2 = [x for x in agg.flood_rows(now=1020.0, rate_threshold=2.0) if x["kind"] == "src"][0]
+    assert r1["attrib"] is r2["attrib"]
+    r3 = [x for x in agg.flood_rows(now=1022.0, rate_threshold=2.0) if x["kind"] == "src"][0]
+    assert r3["attrib"] is not r1["attrib"]
+
+
+def test_attribute_channel_empty_for_a_target_that_is_not_a_flood_source():
+    import attribution
+    t = attribution.Tracks()
+    t.add_radio(5540, "02:00:5e:00:01:c0", "Corp", attribution.Sample(1.0, -59, -62, -61, None))
+    assert attribution.attribute_channel(5540, t, sa="02:00:5e:00:09:01") == []
+
+
 # ---- MGMT FLOODS rendering ----
 
 F2C = {5540: 108, 2437: 6}
