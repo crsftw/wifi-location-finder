@@ -145,10 +145,12 @@ class Aggregator:
         self.seen_ch = {}         # mac -> freq last transmitted on
         self.clients = {}         # client mac -> record (probe-request view)
         self.freq_ts = {}         # freq -> deque[ts]  (all frames, for adaptive hopping)
+        self.tracks = attribution.Tracks()   # per-frame RSSI history for attribution
 
     def add(self, rec, now=None):
         now = time.time() if now is None else now
         freq = rec["freq"]
+        ts = rec.get("ts") or now
         if freq:
             self.freq_ts.setdefault(freq, deque()).append(now)
         # remember where each transmitter was last heard (for MAC auto-locate)
@@ -157,12 +159,20 @@ class Aggregator:
                 self.seen_ch[who] = freq
         if rec["st"] in (BEACON, PROBE_RESP) and rec["bssid"]:
             self._add_net(rec)
-        elif rec["st"] == DEAUTH and freq:
+            if rec["st"] == BEACON and freq and rec.get("chains"):
+                self.tracks.add_radio(freq, rec["bssid"], rec["ssid"],
+                                      attribution.make_sample(ts, rec["chains"], rec.get("seq")))
+        elif rec["st"] in (DEAUTH, DISASSOC) and freq:
             src = rec["sa"] or "??"
-            self.deauth_ts.setdefault((freq, src), deque()).append(now)
+            key = (freq, src, rec["st"])
+            self.deauth_ts.setdefault(key, deque()).append(now)
             self.chan_ts.setdefault(freq, deque()).append(now)
             if rec["rssi"] is not None:
-                self.deauth_rssi[(freq, src)] = rec["rssi"]
+                self.deauth_rssi[key] = rec["rssi"]
+            # only a source we have never heard beacon can be spoofed
+            if rec.get("chains") and src not in self.tracks.bssids:
+                self.tracks.add_source(freq, src, rec["st"],
+                                       attribution.make_sample(ts, rec["chains"], rec.get("seq")))
         elif rec["st"] == PROBE_REQ:
             self._add_client(rec, now)
 
@@ -287,8 +297,10 @@ class Aggregator:
         return sorted(groups.values(), key=lambda r: r["rssi"], reverse=True)
 
     def flood_rows(self, now=None, rate_threshold=2.0):
-        """Rows for the deauth-flood view: an 'all deauths on ch N' row per
-        active channel, plus a per-source row, hottest channel first."""
+        """Rows for the MGMT FLOODS view: an 'all floods on ch N' row per
+        active channel, plus a per-source row - or one row per RSSI cluster
+        when a spoofed source turns out to be several radios - hottest
+        channel first."""
         now = time.time() if now is None else now
         w = self.flood_window
         chan_rate = {}
@@ -298,16 +310,27 @@ class Aggregator:
                 chan_rate[freq] = len(dq) / w
         rows = []
         for freq, rate in chan_rate.items():
-            rows.append({"kind": "all", "freq": freq, "src": None,
-                         "rate": rate, "rssi": None, "flood": rate >= rate_threshold})
-        for (freq, src), dq in self.deauth_ts.items():
+            rows.append({"kind": "all", "freq": freq, "src": None, "st": None,
+                         "type": "", "rate": rate, "rssi": None,
+                         "flood": rate >= rate_threshold, "attrib": None})
+        for (freq, src, st), dq in self.deauth_ts.items():
             self._trim(dq, now, w)
             if not dq:
                 continue
             rate = len(dq) / w
-            rows.append({"kind": "src", "freq": freq, "src": src, "rate": rate,
-                         "rssi": self.deauth_rssi.get((freq, src)),
-                         "flood": rate >= rate_threshold})
+            flood = rate >= rate_threshold
+            base = {"kind": "src", "freq": freq, "src": src, "st": st,
+                    "type": attribution.TYPE_NAMES.get(st, str(st)), "flood": flood}
+            attrs = attribution.attribute(freq, src, st, self.tracks)
+            if not attrs:
+                rows.append({**base, "rate": rate,
+                             "rssi": self.deauth_rssi.get((freq, src, st)),
+                             "attrib": None})
+                continue
+            total = sum(a.samples for a in attrs) or 1
+            for a in attrs:
+                rows.append({**base, "rate": rate * a.samples / total,
+                             "rssi": int(round(a.rssi_mean)), "attrib": a})
         rows.sort(key=lambda r: (-chan_rate.get(r["freq"], 0.0), r["freq"],
                                  0 if r["kind"] == "all" else 1, -r["rate"]))
         return rows

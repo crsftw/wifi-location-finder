@@ -5,6 +5,7 @@ Feeds synthetic tshark 'combined' lines through the real parse_combined ->
 Aggregator path (no radio, no curses). Run: pytest test_sniffer.py
 """
 import sniffer
+import pytest
 import device_id
 
 OUI = device_id.load_oui()
@@ -266,3 +267,75 @@ def test_combined_capture_includes_disassoc_and_new_fields():
     assert "wlan.fc.type_subtype==10" in sniffer.COMBINED_FILTER
     assert sniffer.COMBINED_FIELDS[-3:] == ["frame.time_epoch", "wlan.seq", "wlan.ssid"]
     assert sniffer._N_FIXED == len(sniffer.COMBINED_FIELDS) - 1
+
+
+# ---- flood attribution in the aggregator ----
+
+def _beacon(bssid, freq, sig, ssid_hex, ts):
+    return line(8, bssid, bssid, freq, sig=sig, ssid=ssid_hex, ts=str(ts))
+
+
+def _flood(sa, freq, sig, ts, seq, st=12):
+    return line(st, sa, "02:00:5e:00:09:0c", freq, sig=sig, ts=str(ts), seq=str(seq))
+
+
+def test_disassoc_rows_are_separate_from_deauth_rows():
+    ls = [_flood("ff:ff:ff:ff:ff:ff", 5540, "-59,-62,-61", 1000 + i * 0.1, i) for i in range(20)]
+    ls += [_flood("ff:ff:ff:ff:ff:ff", 5540, "-59,-62,-61", 1000 + i * 0.1, i, st=10) for i in range(10)]
+    agg = feed(ls, now=1002.0)
+    src_rows = [r for r in agg.flood_rows(now=1002.0, rate_threshold=2.0) if r["kind"] == "src"]
+    assert sorted(r["type"] for r in src_rows) == ["deauth", "disassoc"]
+    assert all(r["src"] == "ff:ff:ff:ff:ff:ff" for r in src_rows)
+    allrow = [r for r in agg.flood_rows(now=1002.0) if r["kind"] == "all"][0]
+    assert allrow["type"] == "" and allrow["attrib"] is None
+    assert allrow["rate"] == pytest.approx(30 / 5.0)
+
+
+def test_spoofed_flood_row_carries_attribution_to_matching_radio():
+    ls = []
+    for i in range(40):
+        ts = 1000 + i * 0.5
+        ls.append(_flood("ff:ff:ff:ff:ff:ff", 5540, "-59,-62,-61", ts, 600 + i))
+        ls.append(_beacon("02:00:5e:00:01:c0", 5540, "-59,-62,-61", "436f7270", ts))   # Corp
+        ls.append(_beacon("02:00:5e:00:01:c1", 5540, "-59,-62,-61", "4775657374", ts)) # Guest
+        ls.append(_beacon("02:00:5e:00:02:a0", 5540, "-67,-70,-69", "4f74686572", ts)) # Other
+    agg = feed(ls, now=1020.0)
+    rows = [r for r in agg.flood_rows(now=1020.0, rate_threshold=2.0) if r["kind"] == "src"]
+    assert len(rows) == 1
+    a = rows[0]["attrib"]
+    assert a is not None and a.radio.key == "00:5e:00:01:c"
+    assert rows[0]["rssi"] == -59
+    assert rows[0]["type"] == "deauth" and rows[0]["st"] == 12
+
+
+def test_real_source_deauth_is_not_attributed():
+    # an AP we have heard beaconing deauths a client: real source, no attribution
+    ls = [_beacon("02:00:5e:00:01:c0", 2437, "-50", "436f7270", 1000.0)]
+    ls += [_flood("02:00:5e:00:01:c0", 2437, "-50", 1000 + i * 0.1, i) for i in range(5)]
+    agg = feed(ls, now=1001.0)
+    rows = [r for r in agg.flood_rows(now=1001.0) if r["kind"] == "src"]
+    assert len(rows) == 1 and rows[0]["attrib"] is None
+    assert agg.tracks.source(2437, "02:00:5e:00:01:c0", 12) == []
+
+
+def test_two_rssi_clusters_from_one_spoofed_source_are_two_rows():
+    ls = []
+    for i in range(40):
+        ts = 1000 + i * 0.5
+        ls.append(_flood("ff:ff:ff:ff:ff:ff", 5220, "-61,-63,-62", ts, 100 + i))
+        ls.append(_beacon("02:00:5e:00:01:c0", 5220, "-61,-63,-62", "436f7270", ts))
+    for i in range(20):
+        ts = 1000 + i
+        ls.append(_flood("ff:ff:ff:ff:ff:ff", 5220, "-91,-93,-92", ts, 500 + i))
+        ls.append(_beacon("02:00:5e:00:01:60", 5220, "-91,-93,-92", "436f7270", ts))
+    agg = feed(ls, now=1020.0)
+    rows = [r for r in agg.flood_rows(now=1020.0, rate_threshold=2.0) if r["kind"] == "src"]
+    assert [r["rssi"] for r in rows] == [-61, -91]
+    assert [r["attrib"].radio.key for r in rows] == ["00:5e:00:01:c", "00:5e:00:01:6"]
+    assert rows[0]["rate"] > rows[1]["rate"]           # rate split by cluster share
+    assert rows[0]["flood"] == rows[1]["flood"]        # the flag is per source
+
+
+def test_tracks_use_frame_timestamp_not_drain_time():
+    agg = feed([_flood("ff:ff:ff:ff:ff:ff", 5540, "-59", 1234.5, 1)], now=9999.0)
+    assert agg.tracks.source(5540, "ff:ff:ff:ff:ff:ff", 12)[0].ts == 1234.5
