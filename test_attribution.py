@@ -70,3 +70,37 @@ def test_radio_name_hidden_when_no_ssid_seen():
     t = A.Tracks()
     t.add_radio(2437, "02:00:5e:00:02:a0", "", A.Sample(1.0, -50, None, None, None))
     assert t.radios_on(2437)[0].name() == "<hidden>"
+
+
+# ---- 1. clustering ----
+
+def _s(combined, ts=0.0, a=None, b=None, seq=None):
+    return A.Sample(ts, combined, a, b, seq)
+
+
+def test_cluster_one_tight_group_is_one_cluster():
+    samples = [_s(-60 + (i % 3)) for i in range(50)]      # -60/-59/-58
+    assert len(A.cluster(samples)) == 1
+
+
+def test_cluster_two_groups_30db_apart_split_strongest_first():
+    samples = [_s(-60) for _ in range(50)] + [_s(-90) for _ in range(50)]
+    cl = A.cluster(samples)
+    assert len(cl) == 2
+    assert all(s.combined == -60 for s in cl[0])
+    assert all(s.combined == -90 for s in cl[1])
+
+
+def test_cluster_two_groups_3db_apart_stay_together():
+    samples = [_s(-60) for _ in range(50)] + [_s(-63) for _ in range(50)]
+    assert len(A.cluster(samples)) == 1
+
+
+def test_cluster_sparse_tail_does_not_split():
+    # 5 stray frames at -75 are <10% of the -60 peak: not a second radio
+    samples = [_s(-60) for _ in range(100)] + [_s(-75) for _ in range(5)]
+    assert len(A.cluster(samples)) == 1
+
+
+def test_cluster_empty():
+    assert A.cluster([]) == []

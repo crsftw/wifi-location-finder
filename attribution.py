@@ -146,3 +146,38 @@ class Tracks:
 
     def radios_on(self, freq):
         return [r for (f, _), r in self.radios.items() if f == freq]
+
+
+# ==========================================================================
+# 1. Clustering: one spoofed source address may be several radios
+# ==========================================================================
+
+def cluster(samples):
+    """Split samples on combined RSSI. Walk a 1 dB histogram from the
+    strongest bin down; a run of >= VALLEY_DB bins each holding < VALLEY_FRAC
+    of the current cluster's peak, followed by a bin that is not, starts a
+    new cluster. Weak tails under the fraction are absorbed, not split.
+    Returns clusters strongest first."""
+    if not samples:
+        return []
+    hist = Counter(int(round(s.combined)) for s in samples)
+    lo, hi = min(hist), max(hist)
+    cuts = []            # descending dB values; a cut's bin and below start a new cluster
+    peak = 0
+    valley = 0
+    for db in range(hi, lo - 1, -1):
+        c = hist.get(db, 0)
+        if c and c >= VALLEY_FRAC * peak:
+            if valley >= VALLEY_DB:
+                cuts.append(db)
+                peak = 0
+            peak = max(peak, c)
+            valley = 0
+        else:
+            valley += 1
+    groups = [[] for _ in range(len(cuts) + 1)]
+    for s in samples:
+        v = int(round(s.combined))
+        idx = sum(1 for cut in cuts if v <= cut)
+        groups[idx].append(s)
+    return [g for g in groups if g]
