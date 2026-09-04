@@ -154,3 +154,85 @@ def test_match_flags_one_chain_when_either_side_lacks_chains():
 def test_match_skips_radios_with_no_samples():
     empty = A.RadioTrack("02:00:5e:00:09:0")
     assert A.match([_s(-60)], [empty]) == []
+
+
+# ---- 3. fading correlation ----
+
+def _drift(t):
+    return 4.0 * math.sin(t / 7.0)      # slow multipath-like wander, ±4 dB
+
+
+def _track_with_drift(key, base, seed, n=120, dt=0.5):
+    import random
+    rnd = random.Random(seed)
+    r = A.RadioTrack(key)
+    for i in range(n):
+        t = i * dt
+        v = base + _drift(t) + rnd.gauss(0, 0.5)
+        r.samples.append(A.Sample(t, v, v - 3, v - 2, None))
+    return r
+
+
+def _cluster_with_drift(base, seed, n=120, dt=0.5, drift=_drift):
+    import random
+    rnd = random.Random(seed)
+    return [A.Sample(i * dt, base + drift(i * dt) + rnd.gauss(0, 0.5), None, None, None)
+            for i in range(n)]
+
+
+def test_fading_r_high_when_flood_and_beacons_share_the_path():
+    cl = _cluster_with_drift(-60, seed=1)
+    radio = _track_with_drift("02:00:5e:00:01:c", -62, seed=2)
+    r, bins = A.fading_r(cl, radio)
+    assert bins >= 10
+    assert r > 0.9
+
+
+def test_fading_r_low_for_independent_drift():
+    cl = _cluster_with_drift(-60, seed=1, drift=lambda t: 4.0 * math.cos(t / 3.0))
+    radio = _track_with_drift("02:00:5e:00:01:c", -62, seed=2)
+    r, _ = A.fading_r(cl, radio)
+    assert abs(r) < 0.4
+
+
+def test_fading_r_none_with_fewer_than_four_shared_bins():
+    cl = [_s(-60, ts=t) for t in (0, 1, 5, 6, 10, 11)]          # 3 bins
+    radio = _radio("02:00:5e:00:01:c", -60, -62, -61, n=20)     # ts 0..19 -> 4 bins
+    r, bins = A.fading_r(cl, radio)
+    assert r is None and bins == 3
+
+
+def test_fading_r_none_when_one_side_has_zero_variance():
+    cl = [_s(-60, ts=t) for t in range(40)]                     # flat
+    radio = _track_with_drift("02:00:5e:00:01:c", -62, seed=3)
+    r, bins = A.fading_r(cl, radio)
+    assert r is None and bins >= 4
+
+
+# ---- 4. sequence continuity ----
+
+def test_seq_continuity_perfect_run():
+    cl = [_s(-60, ts=i, seq=100 + i) for i in range(20)]
+    assert A.seq_continuity(cl) == pytest.approx(1.0)
+
+
+def test_seq_continuity_every_other_frame_lost():
+    cl = [_s(-60, ts=i, seq=100 + 2 * i) for i in range(20)]
+    assert A.seq_continuity(cl) == pytest.approx(0.0)
+
+
+def test_seq_continuity_wraps_at_4096():
+    cl = [_s(-60, ts=0, seq=4094), _s(-60, ts=1, seq=4095), _s(-60, ts=2, seq=0)]
+    assert A.seq_continuity(cl) == pytest.approx(1.0)
+
+
+def test_seq_continuity_ignores_duplicate_frames_and_orders_by_time():
+    # the sniffer sees each frame twice on this driver; a repeat is neither hit nor miss
+    cl = [_s(-60, ts=2, seq=12), _s(-60, ts=0, seq=10), _s(-60, ts=1, seq=11),
+          _s(-60, ts=1.1, seq=11)]
+    assert A.seq_continuity(cl) == pytest.approx(1.0)
+
+
+def test_seq_continuity_none_without_two_sequenced_frames():
+    assert A.seq_continuity([_s(-60, seq=5)]) is None
+    assert A.seq_continuity([_s(-60), _s(-60)]) is None

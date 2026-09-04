@@ -216,3 +216,47 @@ def match(cluster, radios):
         out.append(Candidate(r, d, n == 1))
     out.sort(key=lambda c: c.dist)
     return out
+
+
+# ==========================================================================
+# 3. Fading correlation: a transmitter and its own beacons share one path
+# ==========================================================================
+
+def _bin_means(samples, bin_s):
+    bins = defaultdict(list)
+    for s in samples:
+        bins[int(s.ts // bin_s)].append(s.combined)
+    return {k: statistics.fmean(v) for k, v in bins.items() if len(v) >= 2}
+
+
+def fading_r(cluster, radio, bin_s=BIN_S):
+    """Pearson r between per-bin mean RSSI of the cluster and of the radio's
+    beacons, over bins where both have >= 2 samples. (None, n) when fewer
+    than MIN_BINS bins are shared or either side is flat."""
+    a = _bin_means(cluster, bin_s)
+    b = _bin_means(radio.samples, bin_s)
+    keys = sorted(set(a) & set(b))
+    if len(keys) < MIN_BINS:
+        return None, len(keys)
+    xs = [a[k] for k in keys]
+    ys = [b[k] for k in keys]
+    try:
+        return statistics.correlation(xs, ys), len(keys)
+    except statistics.StatisticsError:      # zero variance on one side
+        return None, len(keys)
+
+
+# ==========================================================================
+# 4. Sequence continuity: one counter -> one transmit queue (descriptive)
+# ==========================================================================
+
+def seq_continuity(cluster):
+    """Fraction of time-ordered consecutive frames whose sequence number
+    advances by exactly +1 (mod 4096). Repeated frames (same seq) are skipped.
+    None with fewer than two sequenced frames."""
+    seqs = [s.seq for s in sorted(cluster, key=lambda s: s.ts) if s.seq is not None]
+    pairs = [(p, q) for p, q in zip(seqs, seqs[1:]) if q != p]
+    if not pairs:
+        return None
+    hits = sum(1 for p, q in pairs if (q - p) % SEQ_MOD == 1)
+    return hits / len(pairs)
