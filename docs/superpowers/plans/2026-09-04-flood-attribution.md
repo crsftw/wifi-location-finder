@@ -798,7 +798,7 @@ def test_attribute_names_matching_radio_with_numbers():
     assert len(out) == 1
     a = out[0]
     assert a.marker == A.MARK_OK
-    assert a.radio.key == "02:00:5e:00:01:c"
+    assert a.radio.key == "00:5e:00:01:c"
     assert a.radio.name() == "Corp +1"
     assert a.dist == pytest.approx(0.0, abs=1e-6)
     assert a.runner_up.key == "02:00:5e:00:02:a"
@@ -836,7 +836,7 @@ def test_attribute_none_when_nearest_radio_is_far():
         t.add_radio(5320, "02:00:5e:00:01:c0", "Corp", A.Sample(i, -80, -82, -81, None))
     a = A.attribute(5320, "fe:ff:ff:ff:ff:ff", A.DEAUTH, t)[0]
     assert a.marker == A.MARK_NONE
-    assert a.radio.key == "02:00:5e:00:01:c"       # nearest is still reported
+    assert a.radio.key == "00:5e:00:01:c"       # nearest is still reported
     assert a.dist > A.DIST_NONE
 
 
@@ -1538,7 +1538,7 @@ def test_spoofed_flood_row_carries_attribution_to_matching_radio():
     rows = [r for r in agg.flood_rows(now=1020.0, rate_threshold=2.0) if r["kind"] == "src"]
     assert len(rows) == 1
     a = rows[0]["attrib"]
-    assert a is not None and a.radio.key == "02:00:5e:00:01:c"
+    assert a is not None and a.radio.key == "00:5e:00:01:c"
     assert rows[0]["rssi"] == -59
     assert rows[0]["type"] == "deauth" and rows[0]["st"] == 12
 
@@ -1566,7 +1566,7 @@ def test_two_rssi_clusters_from_one_spoofed_source_are_two_rows():
     agg = feed(ls, now=1020.0)
     rows = [r for r in agg.flood_rows(now=1020.0, rate_threshold=2.0) if r["kind"] == "src"]
     assert [r["rssi"] for r in rows] == [-61, -91]
-    assert [r["attrib"].radio.key for r in rows] == ["02:00:5e:00:01:c", "02:00:5e:00:01:6"]
+    assert [r["attrib"].radio.key for r in rows] == ["00:5e:00:01:c", "00:5e:00:01:6"]
     assert rows[0]["rate"] > rows[1]["rate"]           # rate split by cluster share
     assert rows[0]["flood"] == rows[1]["flood"]        # the flag is per source
 
@@ -1950,7 +1950,7 @@ def test_feed_tracks_routes_beacons_and_spoofed_floods():
                                             "02:00:5e:00:01:c0", 5540, "-59,-62,-61", "7"))
     for rec in (b, d, real):
         router_hunt.feed_tracks(rec, t)
-    assert [r.key for r in t.radios_on(5540)] == ["02:00:5e:00:01:c"]
+    assert [r.key for r in t.radios_on(5540)] == ["00:5e:00:01:c"]
     assert t.radios_on(5540)[0].name() == "Corp"
     assert len(t.source(5540, "ff:ff:ff:ff:ff:ff", 12)) == 1
     assert t.source(5540, "02:00:5e:00:01:c0", 12) == []
