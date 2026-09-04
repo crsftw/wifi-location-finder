@@ -72,23 +72,33 @@ analyse_pcap(path, subtype=None) -> [Attribution]      # offline
 `Attribution` carries: `marker`, `radio` (or None), `dist`, `margin`, `runner_up`,
 `fading_r`, `bins`, `seq_pct`, `samples`, `rssi_mean`, `one_chain` (bool).
 
-Physical radio key is `device_id.base_mac_key` — all virtual BSSIDs of one radio
-share a vector by definition, so matching per BSSID would only produce ties.
+Physical radio key is `attribution.radio_key`: octets 2–5 plus the high
+nibble of octet 6 (`00:5e:00:0a:c` for `02:00:5e:00:0a:c0`). The spec
+originally said `device_id.base_mac_key` (five octets). Two allocation
+schemes appear in the floor-6 data — virtual BSSIDs enumerated in the low
+nibble of the last octet, or a per-SSID first octet with a fixed trailing
+block — and only this key collapses both to one radio; a five-octet key
+merged two radios on channel 44 and split one radio into several tracks
+elsewhere, collapsing the runner-up margin. `device_id.base_mac_key` and
+the NETWORKS view are unchanged.
 
 ### Verdict
 
 | Marker | Condition | Meaning |
 |---|---|---|
-| `✓` | dist ≤ 1.0 dB and margin ≥ 2.0 dB and (r ≥ 0.6, or r is None with ≥ 30 samples) | confident |
+| `✓` | dist ≤ 1.0 dB and margin ≥ 1.0 dB and (r ≥ 0.6, or r is None with ≥ 30 samples) | confident |
 | `?` | a best candidate exists but some threshold fails | possibly X |
 | `✗` | best dist > 6.0 dB, or no radio within range | no beaconing AP matches — likely a separate device |
 | `–` | no beacons seen on the channel | cannot say |
 
-Thresholds are module constants (`DIST_OK=1.0`, `MARGIN_OK=2.0`, `R_OK=0.6`,
+Thresholds are module constants (`DIST_OK=1.0`, `MARGIN_OK=1.0`, `R_OK=0.6`,
 `DIST_NONE=6.0`, `MIN_SAMPLES_NO_R=30`, `WINDOW_S=60`, `BIN_S=5`, `VALLEY_DB=5`),
 set from the floor-6 numbers: matches 0.02–0.17 dB, runner-ups 1.15–10.5 dB,
 r 0.69–0.99. Loosening any of them to make a ground-truth test pass is stated in
-the commit message with the number.
+the commit message with the number. MARGIN_OK was lowered from 2.0 during
+implementation: the channel-108 ground-truth margin is 1.12 dB, and the
+sibling-track collapse that the radio-key fix removed was ~0.02 dB, so 1.0
+keeps the same discrimination without sitting on the boundary.
 
 `✗` is a first-class finding, not a failure: "no beaconing AP within 6 dB of
 this signal" is exactly the evidence that would point at a hidden device, so the
