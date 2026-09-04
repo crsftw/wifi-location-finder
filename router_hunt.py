@@ -51,6 +51,7 @@ from deauth_hunt import (big_digits, SPARK, RSSI_FLOOR, RSSI_CEIL, TxGuard,
                          init_gradient, draw_gradient_bar)
 from deauth_sweep import (detect_iface, iface_phy, iface_mode,
                           read_tx_packets, list_channels, set_channel)
+import attribution
 
 BEACON = 8
 PROBE_RESP = 5
@@ -169,27 +170,56 @@ def parse_disc(line):
             "rssi": first_int(sig), "priv": norm_priv(priv), "ssid": ssid}
 
 
-# ---- hunt: frames transmitted BY the target ----
-HUNT_FIELDS = ["frame.time_epoch", "wlan.sa", "wlan.ta",
-               "radiotap.channel.freq", "radiotap.dbm_antsignal"]
+# ---- hunt: frames transmitted BY the target, plus (optionally) beacons ----
+# SSID last: it may contain '|'. The timestamp, subtype, BSSID, per-chain RSSI
+# and sequence number feed flood attribution (attribution.py) while hunting;
+# the RSSI meter itself reads only "rssi".
+HUNT_FIELDS = ["frame.time_epoch", "wlan.fc.type_subtype", "wlan.sa", "wlan.ta",
+               "wlan.bssid", "radiotap.channel.freq", "radiotap.dbm_antsignal",
+               "wlan.seq", "wlan.ssid"]
+_N_HUNT_FIXED = len(HUNT_FIELDS) - 1
 
 
 def parse_hunt(line):
     parts = line.split("|")
     if len(parts) < len(HUNT_FIELDS):
         return None
-    ts, sa, ta, freq, sig = parts[:5]
+    ts, st, sa, ta, bssid, freq, sig, seq = parts[:_N_HUNT_FIXED]
     try:
         ts = float(ts)
     except ValueError:
         return None
-    rssi = first_int(sig)
-    if rssi is None:
+    chains = attribution.parse_chains(sig)
+    if not chains:
         return None
-    return {"ts": ts, "rssi": rssi,
+    return {"ts": ts, "rssi": chains[0], "chains": chains,
+            "st": first_int(st),
             "sa": sa.split(",")[0].strip().lower(),
             "ta": ta.split(",")[0].strip().lower(),
-            "freq": first_int(freq)}
+            "bssid": bssid.split(",")[0].strip().lower(),
+            "freq": first_int(freq), "seq": first_int(seq),
+            "ssid": decode_ssid("|".join(parts[_N_HUNT_FIXED:]))}
+
+
+def is_target(rec, target):
+    """Does this hunt-capture record belong to the RSSI meter? `target` is the
+    set of MACs being hunted, or None for 'every deauth/disassoc on the channel'."""
+    if target is None:
+        return rec["st"] in (attribution.DEAUTH, attribution.DISASSOC)
+    return rec["sa"] in target or rec["ta"] in target
+
+
+def feed_tracks(rec, tracks):
+    """Route one hunt-capture record into the attribution tracks: beacons to
+    their radio, spoofed-source deauth/disassoc to their flood."""
+    if not rec["freq"]:
+        return
+    sample = attribution.make_sample(rec["ts"], rec["chains"], rec["seq"])
+    if rec["st"] == attribution.BEACON and rec["bssid"]:
+        tracks.add_radio(rec["freq"], rec["bssid"], rec["ssid"], sample)
+    elif rec["st"] in (attribution.DEAUTH, attribution.DISASSOC):
+        if rec["sa"] and rec["sa"] not in tracks.bssids:
+            tracks.add_source(rec["freq"], rec["sa"], rec["st"], sample)
 
 
 # ==========================================================================
@@ -583,7 +613,7 @@ def discover_select(stdscr, iface, cap, hopper, f2c, txguard):
 # Hunt screen
 # ==========================================================================
 
-def hunt(stdscr, iface, label, cap, txguard, args):
+def hunt(stdscr, iface, label, cap, txguard, args, attrib=None):
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.timeout(120)
@@ -599,6 +629,8 @@ def hunt(stdscr, iface, label, cap, txguard, args):
     last_dir = "→"
     last_geiger = 0.0
     frames = deque()          # ts of recent frames for frames/sec
+    attr_lines = []           # attribution.hunt_line() strings, refreshed once a second
+    last_attr = 0.0
 
     while True:
         now = time.time()
@@ -607,6 +639,10 @@ def hunt(stdscr, iface, label, cap, txguard, args):
                 rec = cap.q.get_nowait()
             except queue.Empty:
                 break
+            if attrib is not None:
+                feed_tracks(rec, attrib["tracks"])
+                if not is_target(rec, attrib["target"]):
+                    continue                     # a beacon: attribution only
             r = rec["rssi"]
             roll.append((rec["ts"], r))
             trend.add(rec["ts"], r)
@@ -626,6 +662,13 @@ def hunt(stdscr, iface, label, cap, txguard, args):
             if peak is None or avg > peak:
                 peak = avg
         fps = len(frames) / 3.0
+
+        if attrib is not None and now - last_attr >= 1.0:
+            attrib["tracks"].evict(now)
+            attrs = attribution.attribute_channel(attrib["freq"], attrib["tracks"],
+                                                  sa=attrib["sa"])
+            attr_lines = [attribution.hunt_line(a) for a in attrs]
+            last_attr = now
 
         # ---- trend -> beeps ----
         d = trend.delta(now)
@@ -663,6 +706,10 @@ def hunt(stdscr, iface, label, cap, txguard, args):
         stdscr.addnstr(1, 0, f"beep {audio}   "
                        f"p reset-peak   b beep on/off   q quit",
                        w - 1, curses.A_DIM)
+        if attr_lines:
+            stdscr.addnstr(2, 0, attr_lines[0], w - 1, curses.A_BOLD)
+            for i, extra in enumerate(attr_lines[1:3]):        # further clusters
+                stdscr.addnstr(12 + i, 0, extra, w - 1, curses.A_NORMAL)
 
         shown = f"{avg:.0f}" if avg is not None else "--"
         for i, rowtext in enumerate(big_digits(shown, scale=2)):
@@ -713,16 +760,21 @@ def hunt(stdscr, iface, label, cap, txguard, args):
 # Main
 # ==========================================================================
 
-def build_target_filter(bssids=None, sa=None):
+def build_target_filter(bssids=None, sa=None, with_beacons=False):
+    """Display filter for frames sent by the target. with_beacons also passes
+    every beacon on the channel - they feed attribution, never the meter."""
     if sa:
         m = sa.lower()
-        return f"wlan.sa=={m} || wlan.ta=={m}", sa
-    terms = []
-    for b in bssids:
-        terms.append(f"wlan.sa=={b}")
-        terms.append(f"wlan.ta=={b}")
-    label = ", ".join(sorted(bssids))
-    return " || ".join(terms), label
+        core, label = f"wlan.sa=={m} || wlan.ta=={m}", sa
+    else:
+        terms = []
+        for b in bssids:
+            terms.append(f"wlan.sa=={b}")
+            terms.append(f"wlan.ta=={b}")
+        core, label = " || ".join(terms), ", ".join(sorted(bssids))
+    if with_beacons:
+        return f"({core}) || wlan.fc.type_subtype=={attribution.BEACON}", label
+    return core, label
 
 
 def valid_mac(s):

@@ -8,9 +8,9 @@ the S key:
 
   1. NETWORKS      - APs heard (hidden ones included), collapsed to one row per
                      physical radio by default (g toggles per-SSID).
-  2. DEAUTH FLOODS - channels under a deauthentication flood, ranked by rate,
-                     with a "all deauths on ch N" row for spoofed/randomised
-                     sources.
+  2. MGMT FLOODS   - channels under a deauth/disassoc flood, ranked by rate,
+                     with a LIKELY SOURCE column naming the beaconing radio
+                     whose signal matches each spoofed source (attribution.py).
   3. PROBE CLIENTS - client devices heard probing, with the named networks each
                      is searching for (its saved-network list).
   4. TRACK MAC     - type a MAC; it is auto-located by channel-hopping, then
@@ -47,8 +47,10 @@ from router_hunt import (CaptureThread, Hopper, hunt, build_target_filter,
                          ssid_display, first_int, directional_reminder,
                          parse_hunt, HUNT_FIELDS, BEACON, PROBE_RESP, Beeper)
 import device_id
+import attribution
 
 DEAUTH = 12
+DISASSOC = 10
 PROBE_REQ = 4
 
 # One capture feeds all four modes: beacons + probe responses (for networks),
@@ -57,11 +59,13 @@ PROBE_REQ = 4
 COMBINED_FILTER = (f"wlan.fc.type_subtype=={BEACON} || "
                    f"wlan.fc.type_subtype=={PROBE_RESP} || "
                    f"wlan.fc.type_subtype=={DEAUTH} || "
+                   f"wlan.fc.type_subtype=={DISASSOC} || "
                    f"wlan.fc.type_subtype=={PROBE_REQ}")
 # SSID is last: it may itself contain the '|' separator, so we rejoin the tail.
 # The three WPS identity fields (cleartext device name/model/manufacturer from
-# WPS-enabled beacons and probe-responses) sit just before it at fixed indices;
-# they are controlled device strings and in practice never contain a '|'.
+# WPS-enabled beacons and probe-responses) sit at fixed indices; they are
+# controlled device strings and in practice never contain a '|'. The frame
+# timestamp and sequence number feed flood attribution (attribution.py).
 COMBINED_FIELDS = ["wlan.fc.type_subtype", "wlan.sa", "wlan.ta", "wlan.da",
                    "wlan.bssid", "radiotap.channel.freq",
                    "radiotap.dbm_antsignal", "wlan.fixed.capabilities.privacy",
@@ -72,8 +76,9 @@ COMBINED_FIELDS = ["wlan.fc.type_subtype", "wlan.sa", "wlan.ta", "wlan.da",
                    "wlan.ext_tag.he_mac_caps", "wlan.ht.mcsset.rxbitmask.8to15",
                    "wlan.ht.mcsset.rxbitmask.16to23",
                    "wps.device_name", "wps.model_name", "wps.manufacturer",
+                   "frame.time_epoch", "wlan.seq",
                    "wlan.ssid"]
-_N_FIXED = 16  # fields before the (possibly '|'-containing) SSID tail
+_N_FIXED = 18  # fields before the (possibly '|'-containing) SSID tail
 
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 
@@ -96,8 +101,12 @@ def parse_combined(line):
         return None
     (st, sa, ta, da, bssid, freq, sig, priv,
      ht, vht, he, rx8, rx16,
-     wps_name, wps_model, wps_manuf) = parts[:_N_FIXED]
+     wps_name, wps_model, wps_manuf, ts, seq) = parts[:_N_FIXED]
     ssid = decode_ssid("|".join(parts[_N_FIXED:]))
+    try:
+        ts = float(ts)
+    except ValueError:
+        ts = None
     return {
         "st": first_int(st),
         "sa": _first(sa).lower(),
@@ -106,6 +115,9 @@ def parse_combined(line):
         "bssid": _first(bssid).lower(),
         "freq": first_int(freq),
         "rssi": first_int(sig),
+        "chains": attribution.parse_chains(sig),   # combined first, then per RX chain
+        "ts": ts,
+        "seq": first_int(seq),
         "priv": norm_priv(priv),
         "has_ht": bool(_first(ht)),
         "has_vht": bool(_first(vht)),
@@ -127,16 +139,22 @@ class Aggregator:
     def __init__(self, flood_window=5.0):
         self.flood_window = flood_window
         self.networks = {}        # bssid -> record
-        self.deauth_ts = {}       # (freq, src) -> deque[ts]
-        self.chan_ts = {}         # freq -> deque[ts]  (all deauths on channel)
-        self.deauth_rssi = {}     # (freq, src) -> last rssi
+        self.deauth_ts = {}       # (freq, src, st) -> deque[ts]
+        self.chan_ts = {}         # freq -> deque[ts]  (all deauth + disassoc frames on channel)
+        self.deauth_rssi = {}     # (freq, src, st) -> last rssi
         self.seen_ch = {}         # mac -> freq last transmitted on
         self.clients = {}         # client mac -> record (probe-request view)
         self.freq_ts = {}         # freq -> deque[ts]  (all frames, for adaptive hopping)
+        self.tracks = attribution.Tracks()   # per-frame RSSI history for attribution
+        self._attrib_cache = {}   # (freq, src, st) -> (computed_at, ([Attribution], [cluster])), 1 s TTL
 
     def add(self, rec, now=None):
         now = time.time() if now is None else now
         freq = rec["freq"]
+        ts = rec.get("ts") or now
+        # one per-frame RSSI/seq sample, reused by both attribution branches
+        sample = (attribution.make_sample(ts, rec["chains"], rec.get("seq"))
+                  if rec.get("chains") else None)
         if freq:
             self.freq_ts.setdefault(freq, deque()).append(now)
         # remember where each transmitter was last heard (for MAC auto-locate)
@@ -145,12 +163,18 @@ class Aggregator:
                 self.seen_ch[who] = freq
         if rec["st"] in (BEACON, PROBE_RESP) and rec["bssid"]:
             self._add_net(rec)
-        elif rec["st"] == DEAUTH and freq:
+            if rec["st"] == BEACON and freq and sample:
+                self.tracks.add_radio(freq, rec["bssid"], rec["ssid"], sample)
+        elif rec["st"] in (DEAUTH, DISASSOC) and freq:
             src = rec["sa"] or "??"
-            self.deauth_ts.setdefault((freq, src), deque()).append(now)
+            key = (freq, src, rec["st"])
+            self.deauth_ts.setdefault(key, deque()).append(now)
             self.chan_ts.setdefault(freq, deque()).append(now)
             if rec["rssi"] is not None:
-                self.deauth_rssi[(freq, src)] = rec["rssi"]
+                self.deauth_rssi[key] = rec["rssi"]
+            # only a source we have never heard beacon can be spoofed
+            if sample and src not in self.tracks.bssids:
+                self.tracks.add_source(freq, src, rec["st"], sample)
         elif rec["st"] == PROBE_REQ:
             self._add_client(rec, now)
 
@@ -274,11 +298,35 @@ class Aggregator:
             g["n_bssids"] = len(g["bssids"])
         return sorted(groups.values(), key=lambda r: r["rssi"], reverse=True)
 
+    def _attribs(self, freq, src, st, now):
+        """attribute() is expensive and flood_rows() is called every render
+        tick (twice, in TRACK MAC mode) - cache it for 1 s, like hunt()
+        already does for its own attribution line. Cached as (attrs,
+        clusters) together: both walk the same samples, in the same order
+        (strongest first), so flood_rows can zip each Attribution to its
+        own cluster's frames without re-clustering or re-fetching."""
+        hit = self._attrib_cache.get((freq, src, st))
+        if hit and now - hit[0] < 1.0:
+            return hit[1]
+        samples = self.tracks.source(freq, src, st)
+        clusters = attribution.cluster(samples)
+        attrs = attribution.attribute(freq, src, st, self.tracks)
+        result = (attrs, clusters)
+        self._attrib_cache[(freq, src, st)] = (now, result)
+        return result
+
     def flood_rows(self, now=None, rate_threshold=2.0):
-        """Rows for the deauth-flood view: an 'all deauths on ch N' row per
-        active channel, plus a per-source row, hottest channel first."""
+        """Rows for the MGMT FLOODS view: an 'all floods on ch N' row per
+        active channel, plus a per-source row - or one row per RSSI cluster
+        when a spoofed source turns out to be several radios - hottest
+        channel first. Each cluster row's rate and flood flag come from
+        that cluster's own recent frames, not the source's 60-s history:
+        two radios sharing one spoofed address don't drag each other's
+        rate up or down just because they share an address."""
         now = time.time() if now is None else now
+        self.tracks.evict(now)
         w = self.flood_window
+        cutoff = now - w
         chan_rate = {}
         for freq, dq in self.chan_ts.items():
             self._trim(dq, now, w)
@@ -286,16 +334,43 @@ class Aggregator:
                 chan_rate[freq] = len(dq) / w
         rows = []
         for freq, rate in chan_rate.items():
-            rows.append({"kind": "all", "freq": freq, "src": None,
-                         "rate": rate, "rssi": None, "flood": rate >= rate_threshold})
-        for (freq, src), dq in self.deauth_ts.items():
+            rows.append({"kind": "all", "freq": freq, "src": None, "st": None,
+                         "type": "", "rate": rate, "rssi": None,
+                         "flood": rate >= rate_threshold, "attrib": None})
+        for (freq, src, st), dq in list(self.deauth_ts.items()):
             self._trim(dq, now, w)
             if not dq:
+                # forget a source that has gone quiet so deauth_ts,
+                # deauth_rssi and the attrib cache do not grow without bound
+                # under a randomised-source flood
+                del self.deauth_ts[(freq, src, st)]
+                self.deauth_rssi.pop((freq, src, st), None)
+                self._attrib_cache.pop((freq, src, st), None)
                 continue
             rate = len(dq) / w
-            rows.append({"kind": "src", "freq": freq, "src": src, "rate": rate,
-                         "rssi": self.deauth_rssi.get((freq, src)),
-                         "flood": rate >= rate_threshold})
+            base = {"kind": "src", "freq": freq, "src": src, "st": st,
+                    "type": attribution.TYPE_NAMES.get(st, str(st))}
+            attrs, clusters = self._attribs(freq, src, st, now)
+            if not attrs:
+                rows.append({**base, "rate": rate, "flood": rate >= rate_threshold,
+                             "rssi": self.deauth_rssi.get((freq, src, st)),
+                             "attrib": None})
+                continue
+            if len(clusters) == len(attrs):
+                for a, cl in zip(attrs, clusters):
+                    crate = sum(1 for s in cl if s.ts >= cutoff) / w
+                    rows.append({**base, "rate": crate, "flood": crate >= rate_threshold,
+                                 "rssi": int(round(a.rssi_mean)), "attrib": a})
+            else:
+                # attribute() and cluster() disagreed on cluster count - both
+                # walk the same samples, so this should not happen; fall
+                # back to the old proportional split rather than mis-zip
+                # rows to clusters
+                total = sum(a.samples for a in attrs) or 1
+                for a in attrs:
+                    arate = rate * a.samples / total
+                    rows.append({**base, "rate": arate, "flood": arate >= rate_threshold,
+                                 "rssi": int(round(a.rssi_mean)), "attrib": a})
         rows.sort(key=lambda r: (-chan_rate.get(r["freq"], 0.0), r["freq"],
                                  0 if r["kind"] == "all" else 1, -r["rate"]))
         return rows
@@ -352,29 +427,70 @@ def identity_str(mac, oui, net=None, role="", is_flood=False, is_pwn=False):
     return " · ".join(out)
 
 
+# ==========================================================================
+# MGMT FLOODS rendering (module-level so it is testable without curses)
+# ==========================================================================
+
+FLOOD_HEADER = (f"    {'GHz':>6} {'ch':>3}  {'TYPE':<8} {'SOURCE':<17} "
+                f"{'DEVICE':<14} {'f/s':>6} {'RSSI':>5}  LIKELY SOURCE")
+
+
+def format_flood_row(r, oui, f2c):
+    """One MGMT FLOODS line. VENDOR is folded into DEVICE here (a spoofed
+    source has none), which pays for the LIKELY SOURCE column."""
+    flag = "⚑" if r["flood"] else " "
+    if r["kind"] == "all":
+        who, dev, rssi, likely = "ALL floods on ch", "", "   -", attribution.MARK_NA
+    else:
+        who = r["src"]
+        dev = device_or_badge(r["src"], oui, role="attacker", is_flood=r["flood"])
+        rssi = f"{r['rssi']:>5}" if r["rssi"] is not None else "   -"
+        likely = attribution.short_label(r["attrib"]) if r["attrib"] else attribution.MARK_NA
+    return (f"{flag} {fmt_ghz(r['freq']):>6} {f2c.get(r['freq'], '?'):>3}  "
+            f"{r['type']:<8.8} {who:<17.17} {dev:<14.14} "
+            f"{r['rate']:>6.1f} {rssi:>5}  {likely}")
+
+
 def resolve_target(t, f2c):
-    """Map a selection-screen target dict to (display_filter, label, freq, chan)."""
+    """Map a selection-screen target dict to
+    (display_filter, label, freq, chan, attrib_ctx).
+
+    attrib_ctx is the hunt screen's attribution context - the scan screen's
+    tracks, the MACs the meter follows (None = every deauth/disassoc), the
+    channel and the source - or None for a network hunt, where the target *is*
+    the beacons and attribution is meaningless. When there is a context the
+    filter also passes beacons so the attribution keeps learning while parked."""
     freq = t["freq"]
     chan = f2c.get(freq, 0)
     band = fmt_ghz(freq)
     ident = t.get("ident", "")
     who = f" [{ident}]" if ident else ""
     tail = f"(ch{chan} · {band})"
+    tracks = t.get("tracks")
+    wb = tracks is not None
+    ctx = None
     if t["kind"] == "net":
         dfilter, lbl = build_target_filter(bssids=t["bssids"])
         label = f"{lbl}{who}  {tail}"
     elif t["kind"] == "flood_src":
-        dfilter, _ = build_target_filter(sa=t["src"])
+        dfilter, _ = build_target_filter(sa=t["src"], with_beacons=wb)
         label = f"deauth src {t['src']}{who}  {tail}"
+        if wb:
+            ctx = {"tracks": tracks, "target": {t["src"]}, "freq": freq, "sa": t["src"]}
     elif t["kind"] == "flood_all":
-        dfilter = f"wlan.fc.type_subtype=={DEAUTH}"
-        label = f"ALL deauths  {tail}"
+        dfilter = f"wlan.fc.type_subtype=={DEAUTH} || wlan.fc.type_subtype=={DISASSOC}"
+        if wb:
+            dfilter = f"({dfilter}) || wlan.fc.type_subtype=={BEACON}"
+            ctx = {"tracks": tracks, "target": None, "freq": freq, "sa": None}
+        label = f"ALL floods  {tail}"
     elif t["kind"] == "mac":
-        dfilter, _ = build_target_filter(sa=t["mac"])
+        dfilter, _ = build_target_filter(sa=t["mac"], with_beacons=wb)
         label = f"MAC {t['mac']}{who}  {tail}"
+        if wb:
+            ctx = {"tracks": tracks, "target": {t["mac"]}, "freq": freq, "sa": t["mac"]}
     else:
         raise ValueError(f"unknown target kind {t['kind']!r}")
-    return dfilter, label, freq, chan
+    return dfilter, label, freq, chan, ctx
 
 
 # ==========================================================================
@@ -382,7 +498,7 @@ def resolve_target(t, f2c):
 # ==========================================================================
 
 MODE_NET, MODE_FLOOD, MODE_PROBE, MODE_MAC = 0, 1, 2, 3
-MODE_NAMES = ["NETWORKS", "DEAUTH FLOODS", "PROBE CLIENTS", "TRACK MAC"]
+MODE_NAMES = ["NETWORKS", "MGMT FLOODS", "PROBE CLIENTS", "TRACK MAC"]
 N_MODES = len(MODE_NAMES)
 MAC_CHARS = set("0123456789abcdefABCDEF:")
 
@@ -417,7 +533,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
         # auto-locate: as soon as the typed MAC is heard, hunt it
         if locating and locating in agg.seen_ch:
             return {"kind": "mac", "mac": locating, "freq": agg.seen_ch[locating],
-                    "ident": identity_str(locating, oui)}
+                    "ident": identity_str(locating, oui), "tracks": agg.tracks}
 
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -485,28 +601,13 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
         elif mode == MODE_FLOOD:
             rows = agg.flood_rows(now, args.rate)
             cur_flood = max(0, min(cur_flood, len(rows) - 1)) if rows else 0
-            stdscr.addnstr(3, 0, "UP/DOWN move  ENTER hunt  "
-                           "(⚑ = flood; 'all' row tracks every deauth on that ch)",
+            stdscr.addnstr(3, 0, "UP/DOWN move  ENTER hunt  (⚑ = flood; 'all' row "
+                           "tracks every deauth/disassoc on that ch; "
+                           "✓ ? ✗ = attribution confidence)",
                            w - 1, curses.A_DIM)
-            hdr = (f"    {'GHz':>6} {'ch':>3}  {'source':<17} "
-                   f"{'VENDOR':<12} {'DEVICE':<14} {'d/s':>6} {'RSSI':>5}")
-            stdscr.addnstr(4, 0, hdr, w - 1, curses.A_UNDERLINE)
-
-            def flood_line(r):
-                flag = "⚑" if r["flood"] else " "
-                if r["kind"] == "all":
-                    who, vend, dev = "ALL deauths on ch", "", ""
-                    rssi = "   -"
-                else:
-                    who = r["src"]
-                    vend = vendor_cell(r["src"], oui)
-                    dev = device_or_badge(r["src"], oui, role="attacker",
-                                          is_flood=r["flood"])
-                    rssi = f"{r['rssi']:>5}" if r["rssi"] is not None else "   -"
-                return (f"{flag} {fmt_ghz(r['freq']):>6} {f2c.get(r['freq'],'?'):>3}  "
-                        f"{who:<17.17} {vend:<12.12} {dev:<14.14} "
-                        f"{r['rate']:>6.1f} {rssi:>5}")
-            _draw_list(stdscr, 5, h - 6, rows, cur_flood, flood_line,
+            stdscr.addnstr(4, 0, FLOOD_HEADER, w - 1, curses.A_UNDERLINE)
+            _draw_list(stdscr, 5, h - 6, rows, cur_flood,
+                       lambda r: format_flood_row(r, oui, f2c),
                        dim=lambda r: not r["flood"], w=w)
 
         elif mode == MODE_PROBE:
@@ -544,6 +645,15 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                                "tracked as a transmitter)", w - 1, curses.A_DIM)
                 if mac_error:
                     stdscr.addnstr(7, 2, mac_error, w - 1, curses.A_BOLD)
+                m = mac_input.strip().lower()
+                if valid_mac(m):
+                    hits = [r for r in agg.flood_rows(now, args.rate)
+                            if r["kind"] == "src" and r["src"] == m and r["attrib"]]
+                    for i, r in enumerate(hits[:3]):
+                        stdscr.addnstr(9 + i, 2,
+                                       f"flooding on ch{f2c.get(r['freq'], '?')}: "
+                                       f"{attribution.short_label(r['attrib'])}",
+                                       w - 3, curses.A_BOLD)
 
         if cap.error:
             stdscr.addnstr(h - 1, 0, f"capture error: {cap.error}", w - 1, curses.A_BOLD)
@@ -569,7 +679,7 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                     mac_error = f"not a valid MAC: {mac_input!r}"
                 elif m in agg.seen_ch:
                     return {"kind": "mac", "mac": m, "freq": agg.seen_ch[m],
-                            "ident": identity_str(m, oui)}
+                            "ident": identity_str(m, oui), "tracks": agg.tracks}
                 else:
                     locating = m
                     mac_error = ""
@@ -646,17 +756,19 @@ def select_screen(stdscr, iface, cap, hopper, f2c, txguard, oui, args):
                     continue
                 r = rows[cur_flood]
                 if r["kind"] == "all":
-                    return {"kind": "flood_all", "freq": r["freq"]}
+                    return {"kind": "flood_all", "freq": r["freq"], "tracks": agg.tracks}
                 return {"kind": "flood_src", "src": r["src"], "freq": r["freq"],
                         "ident": identity_str(r["src"], oui, role="attacker",
-                                              is_flood=r["flood"])}
+                                              is_flood=r["flood"]),
+                        "tracks": agg.tracks}
             elif mode == MODE_PROBE:
                 rows = agg.client_rows()
                 if not rows:
                     continue
                 r = rows[cur_probe]
                 return {"kind": "mac", "mac": r["mac"], "freq": r["freq"],
-                        "ident": identity_str(r["mac"], oui, net=r, role="client")}
+                        "ident": identity_str(r["mac"], oui, net=r, role="client"),
+                        "tracks": agg.tracks}
 
 
 def _draw_list(stdscr, top, maxrows, rows, cursor, line_fn, dim, w):
@@ -770,14 +882,14 @@ def main():
             print("done.")
             return
 
-        dfilter, label, freq, chan = resolve_target(target, f2c)
+        dfilter, label, freq, chan, attrib = resolve_target(target, f2c)
         if freq:
             set_channel(iface, chan or 0, freq)
         hcap = CaptureThread(iface, dfilter, HUNT_FIELDS, parse_hunt)
         hcap.start()
         directional_reminder()
         try:
-            curses.wrapper(hunt, iface, label, hcap, txguard, args)
+            curses.wrapper(hunt, iface, label, hcap, txguard, args, attrib)
         finally:
             hcap.stop()
         # loop back to a fresh scan/select screen
