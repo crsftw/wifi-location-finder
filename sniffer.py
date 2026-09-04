@@ -146,7 +146,7 @@ class Aggregator:
         self.clients = {}         # client mac -> record (probe-request view)
         self.freq_ts = {}         # freq -> deque[ts]  (all frames, for adaptive hopping)
         self.tracks = attribution.Tracks()   # per-frame RSSI history for attribution
-        self._attrib_cache = {}   # (freq, src, st) -> (computed_at, [Attribution]), 1 s TTL
+        self._attrib_cache = {}   # (freq, src, st) -> (computed_at, ([Attribution], [cluster])), 1 s TTL
 
     def add(self, rec, now=None):
         now = time.time() if now is None else now
@@ -301,22 +301,32 @@ class Aggregator:
     def _attribs(self, freq, src, st, now):
         """attribute() is expensive and flood_rows() is called every render
         tick (twice, in TRACK MAC mode) - cache it for 1 s, like hunt()
-        already does for its own attribution line."""
+        already does for its own attribution line. Cached as (attrs,
+        clusters) together: both walk the same samples, in the same order
+        (strongest first), so flood_rows can zip each Attribution to its
+        own cluster's frames without re-clustering or re-fetching."""
         hit = self._attrib_cache.get((freq, src, st))
         if hit and now - hit[0] < 1.0:
             return hit[1]
+        samples = self.tracks.source(freq, src, st)
+        clusters = attribution.cluster(samples)
         attrs = attribution.attribute(freq, src, st, self.tracks)
-        self._attrib_cache[(freq, src, st)] = (now, attrs)
-        return attrs
+        result = (attrs, clusters)
+        self._attrib_cache[(freq, src, st)] = (now, result)
+        return result
 
     def flood_rows(self, now=None, rate_threshold=2.0):
         """Rows for the MGMT FLOODS view: an 'all floods on ch N' row per
         active channel, plus a per-source row - or one row per RSSI cluster
         when a spoofed source turns out to be several radios - hottest
-        channel first."""
+        channel first. Each cluster row's rate and flood flag come from
+        that cluster's own recent frames, not the source's 60-s history:
+        two radios sharing one spoofed address don't drag each other's
+        rate up or down just because they share an address."""
         now = time.time() if now is None else now
         self.tracks.evict(now)
         w = self.flood_window
+        cutoff = now - w
         chan_rate = {}
         for freq, dq in self.chan_ts.items():
             self._trim(dq, now, w)
@@ -338,19 +348,29 @@ class Aggregator:
                 self._attrib_cache.pop((freq, src, st), None)
                 continue
             rate = len(dq) / w
-            flood = rate >= rate_threshold
             base = {"kind": "src", "freq": freq, "src": src, "st": st,
-                    "type": attribution.TYPE_NAMES.get(st, str(st)), "flood": flood}
-            attrs = self._attribs(freq, src, st, now)
+                    "type": attribution.TYPE_NAMES.get(st, str(st))}
+            attrs, clusters = self._attribs(freq, src, st, now)
             if not attrs:
-                rows.append({**base, "rate": rate,
+                rows.append({**base, "rate": rate, "flood": rate >= rate_threshold,
                              "rssi": self.deauth_rssi.get((freq, src, st)),
                              "attrib": None})
                 continue
-            total = sum(a.samples for a in attrs) or 1
-            for a in attrs:
-                rows.append({**base, "rate": rate * a.samples / total,
-                             "rssi": int(round(a.rssi_mean)), "attrib": a})
+            if len(clusters) == len(attrs):
+                for a, cl in zip(attrs, clusters):
+                    crate = sum(1 for s in cl if s.ts >= cutoff) / w
+                    rows.append({**base, "rate": crate, "flood": crate >= rate_threshold,
+                                 "rssi": int(round(a.rssi_mean)), "attrib": a})
+            else:
+                # attribute() and cluster() disagreed on cluster count - both
+                # walk the same samples, so this should not happen; fall
+                # back to the old proportional split rather than mis-zip
+                # rows to clusters
+                total = sum(a.samples for a in attrs) or 1
+                for a in attrs:
+                    arate = rate * a.samples / total
+                    rows.append({**base, "rate": arate, "flood": arate >= rate_threshold,
+                                 "rssi": int(round(a.rssi_mean)), "attrib": a})
         rows.sort(key=lambda r: (-chan_rate.get(r["freq"], 0.0), r["freq"],
                                  0 if r["kind"] == "all" else 1, -r["rate"]))
         return rows

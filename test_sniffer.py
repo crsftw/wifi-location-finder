@@ -346,8 +346,34 @@ def test_two_rssi_clusters_from_one_spoofed_source_are_two_rows():
     rows = [r for r in agg.flood_rows(now=1020.0, rate_threshold=2.0) if r["kind"] == "src"]
     assert [r["rssi"] for r in rows] == [-61, -91]
     assert [r["attrib"].radio.key for r in rows] == ["00:5e:00:01:c", "00:5e:00:01:6"]
-    assert rows[0]["rate"] > rows[1]["rate"]           # rate split by cluster share
-    assert rows[0]["flood"] == rows[1]["flood"]        # the flag is per source
+    # strong cluster: 10 frames at ts 1015.0-1019.5 (>= now-5) -> 2.0 f/s
+    # weak cluster: 5 frames at ts 1015-1019 (>= now-5) -> 1.0 f/s
+    assert rows[0]["rate"] == pytest.approx(2.0)
+    assert rows[1]["rate"] == pytest.approx(1.0)
+    assert rows[0]["flood"] is True
+    assert rows[1]["flood"] is False
+
+
+def test_stopped_cluster_shows_zero_rate_and_no_flag():
+    # A flooded 30 dB below B and stopped 10 s ago; B floods now. Each
+    # cluster's rate must come from its own recent frames, not a 60-s share.
+    ls = []
+    for i in range(10):
+        ts = 1000 + i                                  # 1000..1009: stopped
+        ls.append(_flood("ff:ff:ff:ff:ff:ff", 5220, "-61,-63,-62", ts, 100 + i))
+        ls.append(_beacon("02:00:5e:00:01:c0", 5220, "-61,-63,-62", "436f7270", ts))
+    for i in range(10):
+        ts = 1015 + i * 0.5                             # 1015..1019.5: active, 2 f/s
+        ls.append(_flood("ff:ff:ff:ff:ff:ff", 5220, "-91,-93,-92", ts, 500 + i))
+        ls.append(_beacon("02:00:5e:00:01:60", 5220, "-91,-93,-92", "436f7270", ts))
+    agg = feed(ls, now=1020.0)
+    rows = [r for r in agg.flood_rows(now=1020.0, rate_threshold=2.0) if r["kind"] == "src"]
+    stopped = next(r for r in rows if r["rssi"] == -61)
+    active = next(r for r in rows if r["rssi"] == -91)
+    assert stopped["rate"] == pytest.approx(0.0)
+    assert stopped["flood"] is False
+    assert active["rate"] == pytest.approx(2.0)
+    assert active["flood"] is True
 
 
 def test_tracks_use_frame_timestamp_not_drain_time():
