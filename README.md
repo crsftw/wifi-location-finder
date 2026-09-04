@@ -181,7 +181,9 @@ overturned that.** It is containment — just not from our own controller.
 
 `sweep5g.sh` captured all of 5 GHz on floor 6 (25 channels × 60 s, 2026-09-03)
 and floor 7. The floor-6 write-up is in
-[`pcaps/floor6/floor6-analysis.md`](pcaps/floor6/floor6-analysis.md); the summary:
+kept out of this repo along with the captures (see
+[Captures and logs stay local](#captures-and-logs-stay-local)); the summary,
+with BSSIDs and SSIDs replaced by placeholders:
 
 - **8,517 forged deauths** across 8 of 25 channels, all with source
   `ff:ff:ff:ff:ff:ff` and reason code 7. Every target is a Cisco `-SITE` BSSID:
@@ -190,7 +192,7 @@ and floor 7. The floor-6 write-up is in
   broadcasting the `NEIGHBOR-*` SSID set, matched by clustering the forged frames on
   their `[combined, ant A, ant B]` signal vector and correlating fading against
   every AP beaconing on that channel. Matches land within 0.02–0.17 dB with the
-  nearest non-NEIGHBOR candidate 1–10 dB away, and the `8c:88:81` OUI is a burned-in
+  nearest non-neighbour candidate 1–10 dB away, and the `8c:88:81` OUI is a burned-in
   Cisco Meraki address, so the vendor is read off the wire rather than guessed.
   The transmitter address in the frames is still spoofed — the attribution is
   physical-layer inference, strong but not a signed confession.
@@ -250,8 +252,8 @@ retunes the receiver with `iw`; retuning is not transmitting.
 | `router_hunt.py` | Discover networks and direction-find one (the discovery + hunt engine `sniffer.py` builds on; usable standalone). Also holds the adaptive-hopping scheduler |
 | `deauth_hunt.py` | Single-channel RSSI meter with **waypoint recorder, SQLite log, and web dashboard** — for logged, methodical building sweeps once you know the channel |
 | `init-hunt.sh` | Card setup: regdomain, monitor mode, channel, chain constraint, capture verification |
-| `hunt.db` | SQLite: every sample plus your marked waypoints (written by `deauth_hunt.py`) |
-| `pcaps/` | Sweep output: `floor<N>/floor_<N>_channel_<CH>.pcapng` plus the run log and the written-up analysis. The pcapngs are **not** in git (hundreds of MB per sweep); the logs and analysis are |
+| `hunt.db` | SQLite: every sample plus your marked waypoints (written by `deauth_hunt.py`). Created on first run, **gitignored** |
+| `pcaps/` | Sweep output: `floor<N>/floor_<N>_channel_<CH>.pcapng` plus the run log. Created by `sweep5g.sh`, **gitignored** |
 | `old_scripts/antenna-check.sh` | Pre-hunt antenna test: live signal swing, per-chain RSSI probe (receive-only) |
 | `old_scripts/make_test_capture.py` | Synthesises a pcap with the exact signature, for off-site validation |
 
@@ -270,8 +272,8 @@ multi-BSSID collapse, adaptive-hop scheduling) is unit-tested — run **`pytest`
   web view** → `deauth_hunt.py` (below).
 - **Want the whole band on disk to pick apart later** → `./sweep5g.sh` (below).
   Live tools hop and therefore miss things; a sweep captures each channel in full
-  for 60 s, which is what the attribution work in `pcaps/floor6/floor6-analysis.md`
-  needed.
+  for 60 s, which is what the attribution work behind
+  [What the full-band sweeps found](#what-the-full-band-sweeps-found) needed.
 
 ## `deauth_hunt.py` — logged single-channel hunt
 
@@ -351,8 +353,8 @@ Output lands in `pcaps/floor<N>/floor_<N>_channel_<CH>.pcapng`. On exit — incl
 Ctrl-C, which keeps everything captured so far — it prints a per-channel summary of
 packets, beacons, **spoofed deauths** (`wlan.ta == ff:ff:ff:ff:ff:ff`) and file size,
 which is usually enough on its own to tell you which channels are worth opening.
-Save that summary next to the captures; `pcaps/capture_log_floor6.txt` and
-`pcaps/capture_log_floor7.txt` are the ones from the sweeps analysed below.
+Save that summary next to the captures — `pcaps/capture_log_floor<N>.txt` is the
+convention used here.
 
 Like everything else here it is **receive-only**: the only things it does to the
 radio are `iw dev … set channel` (retunes the receiver) and `dumpcap` (captures).
@@ -364,7 +366,17 @@ as if it were a different one.
 rather than just detect them — cluster the forged deauths on a channel by their
 signal vector (`[combined, antenna A, antenna B]`), correlate their fading against
 every AP beaconing on that channel, and the transmitter falls out.
-`pcaps/floor6/floor6-analysis.md` is a worked example of exactly that.
+[What the full-band sweeps found](#what-the-full-band-sweeps-found) is the result
+of doing exactly that to a floor's worth of captures.
+
+### Captures and logs stay local
+
+`pcaps/` and `hunt.db` are gitignored and deliberately absent from this repo.
+Raw captures run to hundreds of megabytes per sweep, and both they and the
+analysis written from them contain live BSSIDs, SSIDs and client MAC addresses
+for a production network. Keep sweep output, capture logs and any write-up on
+the capture machine; publish only findings with the identifiers replaced, which
+is what the section above does.
 
 ## Field procedure
 

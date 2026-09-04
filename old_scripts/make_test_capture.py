@@ -11,10 +11,14 @@ toward the emitter and past it.
   ./deauth_hunt.py --replay test.pcap    # watch the meter track it
 
 SAFETY: this writes a FILE. It transmits nothing and needs no wireless hardware.
-By default the target BSSIDs are locally-administered placeholders (02:00:5e:..)
-that match no real hardware, so even if the file were replayed onto an interface
-it could not deauthenticate anything real. Pass --real-bssids only if you need
-byte-identical fidelity with the production capture, and never replay the result.
+The target BSSIDs are locally-administered placeholders (02:00:5e:..) that match
+no real hardware, so even if the file were replayed onto an interface it could
+not deauthenticate anything real.
+
+No production BSSID is stored in this repo. If you genuinely need byte-identical
+fidelity with a real capture, pass --targets with a comma-separated list (or a
+path to a file of one BSSID per line) kept outside version control - and never
+replay the result onto an interface, because it is then a working deauth.
 """
 
 import argparse
@@ -31,13 +35,6 @@ SAFE_TARGETS = [
     "02:00:5e:00:03:8c", "02:00:5e:00:03:8d",
 ]
 
-# The genuine BSSIDs under attack. Opt-in only - a file containing these is a
-# working deauth against production APs if anyone ever replays it.
-REAL_TARGETS = [
-    "02:00:5e:00:01:8c", "02:00:5e:00:01:8d", "02:00:5e:00:01:8f",
-    "02:00:5e:00:02:ac", "02:00:5e:00:02:ad", "02:00:5e:00:02:af",
-    "02:00:5e:00:03:8c", "02:00:5e:00:03:8d",
-]
 ATTACKER_SA = "fe:ff:ff:ff:ff:ff"
 REASON = 7
 DATARATE_500K = 24          # 12 Mbps OFDM
@@ -46,6 +43,19 @@ LINKTYPE_RADIOTAP = 127
 # radiotap present bits: Flags(1) Rate(2) Channel(3) dBmAntSignal(5) Antenna(11)
 PRESENT = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5) | (1 << 11)
 CHAN_FLAGS_5G_OFDM = 0x0140
+
+
+def load_targets(spec):
+    """--targets: a comma-separated list, or a path to one-BSSID-per-line."""
+    try:
+        with open(spec) as fh:
+            items = [ln.split("#")[0].strip() for ln in fh]
+    except OSError:
+        items = [x.strip() for x in spec.split(",")]
+    items = [x for x in items if x]
+    if not items:
+        raise SystemExit(f"--targets: no BSSIDs found in {spec!r}")
+    return items
 
 
 def mac_bytes(s):
@@ -92,12 +102,13 @@ def main():
     ap.add_argument("--noise", type=int, default=0,
                     help="also emit N/sec of unrelated beacons the filter must reject")
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--real-bssids", action="store_true",
-                    help="use the genuine production BSSIDs instead of safe "
-                         "placeholders (fidelity testing only - NEVER replay it)")
+    ap.add_argument("--targets", metavar="LIST|FILE",
+                    help="comma-separated BSSIDs, or a file with one per line, "
+                         "to use instead of the safe placeholders (fidelity "
+                         "testing only - NEVER replay the result)")
     args = ap.parse_args()
 
-    targets = REAL_TARGETS if args.real_bssids else SAFE_TARGETS
+    targets = load_targets(args.targets) if args.targets else SAFE_TARGETS
     random.seed(args.seed)
     n = int(args.duration * args.rate)
     seq = 1670
@@ -139,9 +150,9 @@ def main():
     peak = max(rssi_profile(i / args.rate, args.duration, args.near, args.far)
                for i in range(n))
     print(f"wrote {args.out}")
-    if args.real_bssids:
-        print("  !! contains REAL production BSSIDs - this file is a working")
-        print("  !! deauth attack if replayed. Keep it off any live interface.")
+    if args.targets:
+        print("  !! built with caller-supplied BSSIDs - if any of them are real,")
+        print("  !! this file is a working deauth. Keep it off any live interface.")
     else:
         print("  targets: locally-administered placeholders - harmless if replayed")
     print(f"  {deauths} deauth frames @ {args.rate} fps over {args.duration:.0f}s")

@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
+.pytest_cache/
 
-# Raw captures: one 60 s pcapng per channel per floor, hundreds of MB per sweep.
-# The analysis notes and capture logs alongside them ARE tracked.
-pcaps/**/*.pcapng
+# Field data never belongs in this repo. Raw sweeps run to hundreds of MB, and
+# both the captures and anything written from them carry live BSSIDs, SSIDs and
+# client MAC addresses for a production network. Keep them on the capture
+# machine; publish findings with the identifiers replaced instead.
+pcaps/
+hunt.db
