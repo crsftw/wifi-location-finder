@@ -181,3 +181,38 @@ def cluster(samples):
         idx = sum(1 for cut in cuts if v <= cut)
         groups[idx].append(s)
     return [g for g in groups if g]
+
+
+# ==========================================================================
+# 2. Vector matching: [combined, chain A, chain B] vs each radio's beacons
+# ==========================================================================
+
+Candidate = namedtuple("Candidate", "radio dist one_chain")
+
+
+def _vec(samples):
+    """Mean signal vector. Three values when every sample carries both chains,
+    otherwise just the combined mean (single-chain drivers, or mixed data)."""
+    comb = statistics.fmean(s.combined for s in samples)
+    if all(s.chain_a is not None and s.chain_b is not None for s in samples):
+        return (comb,
+                statistics.fmean(s.chain_a for s in samples),
+                statistics.fmean(s.chain_b for s in samples))
+    return (comb,)
+
+
+def match(cluster, radios):
+    """Every radio ranked by Euclidean distance (dB) between the cluster's
+    mean vector and the radio's mean beacon vector. Two RX chains give a
+    coarse bearing signature that one combined value cannot."""
+    cv = _vec(cluster)
+    out = []
+    for r in radios:
+        if not r.samples:
+            continue
+        rv = _vec(r.samples)
+        n = min(len(cv), len(rv))
+        d = math.sqrt(sum((cv[i] - rv[i]) ** 2 for i in range(n)))
+        out.append(Candidate(r, d, n == 1))
+    out.sort(key=lambda c: c.dist)
+    return out

@@ -104,3 +104,53 @@ def test_cluster_sparse_tail_does_not_split():
 
 def test_cluster_empty():
     assert A.cluster([]) == []
+
+
+# ---- 2. vector matching ----
+
+def _radio(key, combined, a, b, n=20, ts0=0.0):
+    r = A.RadioTrack(key)
+    for i in range(n):
+        r.samples.append(A.Sample(ts0 + i, combined, a, b, None))
+    return r
+
+
+def test_vec_is_three_values_when_chains_present():
+    assert A._vec([_s(-59, a=-62, b=-61), _s(-61, a=-64, b=-63)]) == (-60.0, -63.0, -62.0)
+
+
+def test_vec_falls_back_to_combined_only_if_any_chain_missing():
+    assert A._vec([_s(-59, a=-62, b=-61), _s(-61)]) == (-60.0,)
+
+
+def test_match_picks_closest_radio_and_orders_by_distance():
+    cl = [_s(-59, a=-62, b=-61) for _ in range(10)]
+    radios = [_radio("02:00:5e:00:01:c", -59, -62, -61),      # 0.0 dB
+              _radio("02:00:5e:00:02:a", -61, -62, -61),      # 2.0 dB
+              _radio("02:00:5e:00:03:0", -80, -83, -82)]      # ~36 dB
+    cands = A.match(cl, radios)
+    assert [c.radio.key for c in cands] == ["02:00:5e:00:01:c", "02:00:5e:00:02:a",
+                                            "02:00:5e:00:03:0"]
+    assert cands[0].dist == pytest.approx(0.0)
+    assert cands[1].dist == pytest.approx(2.0)
+    assert cands[0].one_chain is False
+
+
+def test_match_two_chains_separate_radios_a_single_value_cannot():
+    # same combined RSSI, opposite chain imbalance -> different bearings
+    cl = [_s(-60, a=-58, b=-64) for _ in range(10)]
+    radios = [_radio("02:00:5e:00:01:c", -60, -64, -58),
+              _radio("02:00:5e:00:02:a", -60, -58, -64)]
+    assert A.match(cl, radios)[0].radio.key == "02:00:5e:00:02:a"
+
+
+def test_match_flags_one_chain_when_either_side_lacks_chains():
+    cl = [_s(-60) for _ in range(10)]
+    cands = A.match(cl, [_radio("02:00:5e:00:01:c", -60, -62, -61)])
+    assert cands[0].one_chain is True
+    assert cands[0].dist == pytest.approx(0.0)
+
+
+def test_match_skips_radios_with_no_samples():
+    empty = A.RadioTrack("02:00:5e:00:09:0")
+    assert A.match([_s(-60)], [empty]) == []
