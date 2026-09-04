@@ -38,7 +38,7 @@ MIN_BINS = 4              # fewer shared bins -> r is None
 VALLEY_DB = 5             # empty dB run that splits two clusters
 VALLEY_FRAC = 0.10        # "empty" = fewer than this fraction of the peak bin
 DIST_OK = 1.0             # vector distance for a confident match
-MARGIN_OK = 1.1           # runner-up must be this much further away
+MARGIN_OK = 1.0           # runner-up must be this much further away
 R_OK = 0.6                # fading correlation for a confident match
 DIST_NONE = 6.0           # beyond this, no beaconing AP matches at all
 MIN_SAMPLES_NO_R = 30     # ✓ without r needs at least this many frames
@@ -80,12 +80,13 @@ _MAC = re.compile(r"^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$")
 
 def radio_key(mac):
     """One physical radio's address block: the last five octets, keeping
-    only the high nibble of the final one, e.g. '00:5e:00:0a:c'. A vendor
-    that enumerates virtual BSSIDs in the low nibble of the last octet is
-    absorbed by that truncation; hardware seen in the wild instead
-    randomizes the *first* octet per SSID (locally-administered bit set)
-    while keeping the trailing block fixed - dropping the first octet
-    handles both without misreading noise on it as a different radio."""
+    only the high nibble of the final one, e.g. radio_key("02:00:5e:00:0a:c0")
+    == '00:5e:00:0a:c'. A vendor that enumerates virtual BSSIDs in the low
+    nibble of the last octet is absorbed by that truncation; hardware seen
+    in the wild instead randomizes the *first* octet per SSID
+    (locally-administered bit set) while keeping the trailing block fixed -
+    dropping the first octet handles both without misreading noise on it as
+    a different radio."""
     m = (mac or "").lower().replace("-", ":")
     if not _MAC.match(m):
         return None

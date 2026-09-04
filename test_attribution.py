@@ -272,7 +272,7 @@ def test_verdict_confident_when_only_radio_on_channel():
 def test_verdict_maybe_when_any_threshold_fails():
     r = A.RadioTrack("02:00:5e:00:01:c")
     assert A.verdict(_attr(radio=r, dist=1.5, margin=3.0, fading_r=0.8)) == A.MARK_MAYBE   # dist
-    assert A.verdict(_attr(radio=r, dist=0.5, margin=1.0, fading_r=0.8)) == A.MARK_MAYBE   # margin
+    assert A.verdict(_attr(radio=r, dist=0.5, margin=0.5, fading_r=0.8)) == A.MARK_MAYBE   # margin
     assert A.verdict(_attr(radio=r, dist=0.5, margin=3.0, fading_r=0.3)) == A.MARK_MAYBE   # r
 
 
