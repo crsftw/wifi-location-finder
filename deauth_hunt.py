@@ -1311,13 +1311,70 @@ def run_selftest(app, seconds):
     return 0 if ok else 1
 
 
-def detect_iface(driver="mt7921u"):
+def detect_iface(driver=None):
+    """Pick the interface to hunt with, chip-agnostically.
+
+    Preference: $HUNT_IFACE -> an interface bound to `driver`/$HUNT_DRIVER if
+    given -> a wireless interface not currently associated to an AP (the spare
+    card, not the one carrying the operator's Wi-Fi), favouring monitor mode
+    then USB. Pass driver= (or set $HUNT_DRIVER) to pin a specific chipset.
+    """
     base = "/sys/class/net"
-    for name in sorted(os.listdir(base)):
+
+    forced = os.environ.get("HUNT_IFACE")
+    if forced and os.path.exists(os.path.join(base, forced)):
+        return forced
+
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return None
+    ifaces = [n for n in names if os.path.exists(os.path.join(base, n, "phy80211"))]
+    if not ifaces:
+        return None
+
+    def drv_of(name):
         link = os.path.join(base, name, "device", "driver")
-        if os.path.exists(link) and os.path.basename(os.path.realpath(link)) == driver:
-            return name
-    return None
+        try:
+            return os.path.basename(os.path.realpath(link)) if os.path.exists(link) else None
+        except OSError:
+            return None
+
+    drv = driver or os.environ.get("HUNT_DRIVER")
+    if drv:
+        # An explicit pin is strict: match it or fail, never a different card.
+        for name in ifaces:
+            if drv_of(name) == drv:
+                return name
+        return None
+
+    def connected(name):
+        try:
+            out = subprocess.run(["iw", "dev", name, "link"],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except Exception:
+            return False
+        return "Connected to" in out
+
+    def is_monitor(name):
+        try:
+            out = subprocess.run(["iw", "dev", name, "info"],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except Exception:
+            return False
+        return any(l.strip().startswith("type ") and l.split()[1] == "monitor"
+                   for l in out.splitlines())
+
+    def is_usb(name):
+        try:
+            return "/usb" in os.path.realpath(os.path.join(base, name, "device"))
+        except OSError:
+            return False
+
+    free = [n for n in ifaces if not connected(n)]
+    pool = free or ifaces
+    return sorted(pool, key=lambda n: (0 if is_monitor(n) else 1,
+                                       0 if is_usb(n) else 1, n))[0]
 
 
 def main():
@@ -1327,7 +1384,8 @@ def main():
     p = argparse.ArgumentParser(
         description="Live RSSI meter and per-floor waypoint recorder for deauth direction finding.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--iface", help="monitor-mode interface (auto-detects mt7921u)")
+    p.add_argument("--iface", help="monitor-mode interface (default: the spare "
+                                    "Wi-Fi card not carrying your connection)")
     p.add_argument("--replay", help="read from a pcap instead of live capture")
     p.add_argument("--fast", action="store_true", help="replay as fast as possible")
     p.add_argument("--channel", type=int, default=DEFAULT_CHANNEL)
@@ -1372,8 +1430,8 @@ def main():
     if not args.replay and not args.iface:
         args.iface = detect_iface()
         if not args.iface:
-            sys.exit("No mt7921u interface found. Plug the Alfa in and run "
-                     "'sudo ./init-hunt.sh' first, or pass --iface.")
+            sys.exit("No spare wireless interface found. Plug the adapter in and run "
+                     "'sudo ./init-hunt.sh' first, or pass --iface (or set $HUNT_IFACE).")
 
     if not args.replay:
         mode = ""

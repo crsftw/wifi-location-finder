@@ -20,10 +20,13 @@ echo "ANTENNA: use 1 directional antenna (one jack, leave the other empty) - thi
 CHANNEL="${HUNT_CHANNEL:-64}"
 FREQ="${HUNT_FREQ:-5320}"
 REGDOM="${HUNT_REG:-GB}"
-DRIVER="${HUNT_DRIVER:-mt7921u}"
+# DRIVER / USB_VENDOR are optional pins. Left empty, the script accepts any
+# wireless card and prefers the spare one (the interface not carrying a live
+# Wi-Fi connection). Set HUNT_DRIVER=mt7921u (etc.) to force a specific adapter.
+DRIVER="${HUNT_DRIVER:-}"
 IFACE="${HUNT_IFACE:-}"
 PROBE_WAIT="${HUNT_PROBE_WAIT:-75}"
-USB_VENDOR="${HUNT_USB_VENDOR:-0e8d}"
+USB_VENDOR="${HUNT_USB_VENDOR:-}"
 RELEASE_BT="${HUNT_RELEASE_BT:-1}"
 VERIFY_SECS="${HUNT_VERIFY_SECS:-6}"
 SINGLE_CHAIN="${HUNT_SINGLE_CHAIN:-1}"
@@ -41,59 +44,94 @@ trap 'err "failed at line $LINENO"' ERR
 # ---------------------------------------------------------------- interface
 step "Locating the capture interface"
 
-find_iface() {
-    local cand n
-    for cand in /sys/class/net/*; do
-        n=$(basename "$cand")
-        [[ -e "$cand/device/driver" ]] || continue
-        if [[ "$(basename "$(readlink -f "$cand/device/driver")")" == "$DRIVER" ]]; then
-            printf '%s' "$n"; return 0
-        fi
-    done
-    return 1
+# Driver bound to an interface (empty if none).
+iface_driver() {
+    basename "$(readlink -f "/sys/class/net/$1/device/driver" 2>/dev/null)" 2>/dev/null
 }
 
-usb_present() { lsusb 2>/dev/null | grep -qiE "ID ${USB_VENDOR}:"; }
+# Is the interface currently associated with an AP? That is the operator's live
+# connection, not the spare card we want for monitor mode.
+iface_connected() { iw dev "$1" link 2>/dev/null | grep -q "Connected to"; }
+
+# Is the interface a USB device (a plug-in adapter)?
+iface_is_usb() { [[ "$(readlink -f "/sys/class/net/$1/device" 2>/dev/null)" == *"/usb"* ]]; }
+
+# Every wireless interface (those with an 802.11 phy).
+wifi_ifaces() {
+    local d n
+    for d in /sys/class/net/*; do
+        n=$(basename "$d")
+        [[ -e "$d/phy80211" ]] && printf '%s\n' "$n"
+    done
+}
+
+# Pick the interface to prepare. If HUNT_DRIVER is pinned, match it. Otherwise
+# prefer a wireless card not carrying a live connection, favouring a USB adapter.
+find_iface() {
+    local n pin_hit="" free="" any=""
+    for n in $(wifi_ifaces); do
+        any="${any:+$any }$n"
+        if [[ -n "$DRIVER" && "$(iface_driver "$n")" == "$DRIVER" ]]; then
+            pin_hit="$n"
+        fi
+        iface_connected "$n" || free="${free:+$free }$n"
+    done
+    [[ -n "$DRIVER" ]] && { [[ -n "$pin_hit" ]] && { printf '%s' "$pin_hit"; return 0; } || return 1; }
+    local pool="${free:-$any}"
+    [[ -z "$pool" ]] && return 1
+    # Prefer a USB adapter within the pool; else take the first.
+    for n in $pool; do
+        iface_is_usb "$n" && { printf '%s' "$n"; return 0; }
+    done
+    printf '%s' "${pool%% *}"; return 0
+}
+
+# When a specific USB vendor is pinned, we can tell "plugged in but not bound
+# yet" apart from "not plugged in" and wait out a slow firmware load.
+usb_present() { [[ -n "$USB_VENDOR" ]] && lsusb 2>/dev/null | grep -qiE "ID ${USB_VENDOR}:"; }
 
 [[ -n "$IFACE" ]] || IFACE=$(find_iface || true)
 
-# The mt7921u takes 30-40 seconds to load firmware and register a netdev after
-# plug-in. Running the script inside that window looks exactly like "not plugged
-# in", so wait it out rather than telling the operator something untrue.
-if [[ -z "$IFACE" ]] && usb_present; then
-    warn "adapter is on the USB bus but has not registered an interface yet"
-    warn "mt7921u firmware load normally takes 30-40s - waiting up to ${PROBE_WAIT}s"
-    for (( i = 1; i <= PROBE_WAIT; i++ )); do
+# Some USB adapters (notably the mt7921u) take 30-40s to load firmware and
+# register a netdev after plug-in. If nothing is present yet, wait: the full
+# window when a pinned adapter is on the bus, a short grace period otherwise.
+if [[ -z "$IFACE" ]]; then
+    if usb_present; then
+        WAIT=$PROBE_WAIT
+        warn "pinned adapter (vendor $USB_VENDOR) is on the USB bus but has not registered yet"
+        warn "firmware load can take 30-40s - waiting up to ${WAIT}s"
+    else
+        WAIT=8
+        warn "no wireless interface yet - waiting up to ${WAIT}s for a driver to bind"
+    fi
+    for (( i = 1; i <= WAIT; i++ )); do
         sleep 1
         IFACE=$(find_iface || true)
         if [[ -n "$IFACE" ]]; then
-            printf '\r%*s\r' 44 ""
+            printf '\r%*s\r' 60 ""
             ok "bound after ${i}s"
             break
         fi
-        printf '\r    waiting for driver probe... %ds ' "$i"
+        printf '\r    waiting for a wireless interface... %ds ' "$i"
     done
-    [[ -n "$IFACE" ]] || printf '\r%*s\r' 44 ""
+    [[ -n "$IFACE" ]] || printf '\r%*s\r' 60 ""
 fi
 
 if [[ -z "$IFACE" ]]; then
-    if usb_present; then
-        err "adapter is on the USB bus but the driver never bound (waited ${PROBE_WAIT}s)"
-        err "Recent kernel messages:"
-        dmesg 2>/dev/null | grep -iE "mt7921u|mt76|usb 1-" | tail -6 | sed 's/^/        /' >&2
-        printf '\n' >&2
-        err "A probe failure with 'error -5' is a known mt7921u quirk. In order:"
-        err "  1. Unplug, wait 5s, plug back in, then re-run this script"
-        err "  2. Move it to a USB 3 (blue) port - probe is far more reliable there"
-        err "  3. sudo modprobe -r mt7921u && sudo modprobe mt7921u"
+    if [[ -n "$DRIVER" ]]; then
+        err "no interface bound to driver '$DRIVER' (waited ${WAIT:-0}s)"
     else
-        err "no MediaTek device on the USB bus and no interface using '$DRIVER'"
-        err "The adapter is not plugged in, or the port is dead. Check with: lsusb"
+        err "no wireless interface found (waited ${WAIT:-0}s)"
     fi
+    err "Check the adapter is plugged in and a driver bound:  lsusb ; iw dev"
+    err "Recent kernel messages:"
+    dmesg 2>/dev/null | grep -iE "usb|firmware|ieee80211|wlan|mt76|rtl|rtw" | tail -8 | sed 's/^/        /' >&2
+    printf '\n' >&2
+    err "You can also target a specific interface:  sudo HUNT_IFACE=wlanX $0"
     exit 1
 fi
 [[ -e "/sys/class/net/$IFACE" ]] || { err "interface '$IFACE' does not exist"; exit 1; }
-ok "interface ${BLD}${IFACE}${RST} (driver $DRIVER)"
+ok "interface ${BLD}${IFACE}${RST} (driver ${DIM}$(iface_driver "$IFACE")${RST})"
 
 # Refuse to hijack the interface carrying the default route.
 DEFAULT_IF=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}' || true)
@@ -241,12 +279,13 @@ if (( UP_OK == 0 )); then
     err "could not bring $IFACE up - the driver timed out talking to firmware"
     err ""
     err "Recent kernel messages:"
-    dmesg 2>/dev/null | grep -iE "mt7921|mt76|Bluetooth: hci|usb ${USBDEV:-1-}" | tail -8 | sed 's/^/        /' >&2
+    DRV_NOW=$(iface_driver "$IFACE")
+    dmesg 2>/dev/null | grep -iE "${DRV_NOW:-mt76}|mt76|rtl|rtw|Bluetooth: hci|usb ${USBDEV:-1-}" | tail -8 | sed 's/^/        /' >&2
     err ""
     err "In order of effectiveness:"
-    err "  1. Move the adapter to a USB 3 (blue) port - this chip is unstable on USB 2"
+    err "  1. Move the adapter to a USB 3 (blue) port - some chips are unstable on USB 2"
     err "  2. Unplug, wait 10s, replug, wait for the driver to bind, re-run"
-    err "  3. sudo modprobe -r mt7921u mt7921_common mt792x_usb && sudo modprobe mt7921u"
+    err "  3. Reload the driver, e.g.:  sudo modprobe -r ${DRV_NOW:-<driver>} && sudo modprobe ${DRV_NOW:-<driver>}"
     exit 1
 fi
 
@@ -261,9 +300,22 @@ if iw dev "$IFACE" set channel "$CHANNEL" 2>/dev/null; then
 elif iw dev "$IFACE" set freq "$FREQ" 2>/dev/null; then
     ok "set freq ${FREQ} MHz (channel form was rejected)"
 else
-    err "could not tune to channel $CHANNEL / ${FREQ} MHz"
-    err "check that $REGDOM permits it:  iw phy $PHY info | grep -A2 '${FREQ}'"
-    exit 1
+    warn "radio cannot tune to channel $CHANNEL / ${FREQ} MHz"
+    warn "(the default is 5 GHz; this card may be 2.4 GHz-only)"
+    # Fall back to the first enabled frequency the phy actually supports, so a
+    # narrower-band card still comes up ready instead of aborting the prep.
+    FALLBACK_FREQ=$(iw phy "$PHY" info 2>/dev/null \
+        | awk '/ MHz \[/ && !/disabled/ {f=$2; sub(/\..*/,"",f); print f; exit}')
+    if [[ -n "$FALLBACK_FREQ" ]] && iw dev "$IFACE" set freq "$FALLBACK_FREQ" 2>/dev/null; then
+        FREQ="$FALLBACK_FREQ"
+        CHANNEL="?"
+        ok "fell back to ${FREQ} MHz - the first channel this card supports"
+        warn "set HUNT_CHANNEL / HUNT_FREQ to pick a specific one"
+    else
+        err "could not tune to any channel on this radio"
+        err "inspect supported channels:  iw phy $PHY info | grep MHz"
+        exit 1
+    fi
 fi
 ACTUAL=$(iw dev "$IFACE" info 2>/dev/null | awk '/channel/{print $0}' | sed 's/^\s*//')
 [[ -n "$ACTUAL" ]] && ok "radio reports: $ACTUAL"
