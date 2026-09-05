@@ -1,6 +1,10 @@
 # deauth-hunt
 
-A receive-only WiFi direction-finding toolkit for an Alfa AWUS036AXML (mt7921u).
+A receive-only WiFi direction-finding toolkit. Built and tuned for an Alfa
+AWUS036AXML (mt7921u), but it runs on **any monitor-capable Wi-Fi adapter** —
+it auto-selects the spare card (the one not carrying your connection) and, on a
+2.4 GHz-only adapter, falls back to a supported channel. See
+[Adapter and interface](#adapter-and-interface).
 It started as a hunt for one specific 802.11 deauthentication flood (the analysis
 below), and grew into **`sniffer.py`** — an all-in-one tool that walks down the
 *transmitter* behind any network, any deauth flood, or any specific MAC, using a
@@ -117,6 +121,35 @@ sudo ./sniffer.py --geiger   # continuous-tone hunt
 
 `sniffer.py` needs `sudo` because it changes channels (`iw`) to hop and to park
 on a target. `init-hunt.sh` still does the one-time monitor-mode setup.
+
+### Adapter and interface
+
+The tools are tuned for the Alfa AWUS036AXML (mt7921u) but are no longer wired to
+any one chipset — they work with **any monitor-capable Wi-Fi adapter**, and
+interface selection is automatic:
+
+- **Auto-detect** picks the wireless interface that is **not** currently
+  associated to an AP — i.e. the spare card you plugged in for the hunt, never
+  the one carrying your own Wi-Fi. Among candidates it prefers one already in
+  monitor mode, then a USB adapter. This applies to `sniffer.py`,
+  `router_hunt.py`, `deauth_hunt.py` and `init-hunt.sh` alike.
+- **Override** it when you need to:
+
+  | Override | Effect |
+  |---|---|
+  | `--iface wlan1` | use this exact interface (CLI flag on the Python tools) |
+  | `HUNT_IFACE=wlan1` | same, via environment — works for every tool, `init-hunt.sh` included |
+  | `HUNT_DRIVER=mt7921u` | pin the card by driver — **strict**: errors if that adapter is absent rather than grabbing the wrong one |
+
+`init-hunt.sh` defaults to a 5 GHz channel (64). On a **2.4 GHz-only** adapter it
+cannot tune there, so it now falls back to the first channel the radio actually
+supports instead of aborting; set `HUNT_CHANNEL` / `HUNT_FREQ` to choose one.
+
+**Band coverage is the adapter's, not the tool's.** A 2.4 GHz-only card (e.g. a
+Realtek RTL8192FU) hunts 2.4 GHz fine, but any 5 GHz network or flood is invisible
+to it, and single-radio cards cannot do the one-RX-chain trick that sharpens the
+closing-in bearing (see [Antenna](#antenna)). For full-band work and the cleanest
+direction-finding, the mt7921u remains the recommended adapter.
 
 ### Keys
 

@@ -798,7 +798,8 @@ def main():
     p = argparse.ArgumentParser(
         description="Discover WiFi networks (hidden included), pick one, and direction-find it.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--iface", help="monitor-mode interface (auto-detects mt7921u)")
+    p.add_argument("--iface", help="monitor-mode interface (default: the spare "
+                                    "Wi-Fi card not carrying your connection)")
     p.add_argument("--sa", help="skip discovery and follow this source MAC directly")
     p.add_argument("--bssid", help="preselect this BSSID (still discovers to find its channel)")
     p.add_argument("--channel", type=int, help="channel to park on for --sa (else current)")
@@ -837,7 +838,8 @@ def main():
 
     iface = args.iface or detect_iface()
     if not iface:
-        sys.exit("No mt7921u interface found. Run 'sudo ./init-hunt.sh' or pass --iface.")
+        sys.exit("No spare wireless interface found. Run 'sudo ./init-hunt.sh', "
+                 "pass --iface, or set $HUNT_IFACE.")
     if not os.path.exists(f"/sys/class/net/{iface}"):
         sys.exit(f"interface '{iface}' does not exist")
     mode = iface_mode(iface)

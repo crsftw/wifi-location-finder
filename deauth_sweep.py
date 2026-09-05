@@ -31,7 +31,6 @@ from collections import Counter, defaultdict
 # I/G bit cleared. When we see this exact source flooding a channel, that is
 # almost certainly the same emitter and worth calling out by name.
 KNOWN_SA = "fe:ff:ff:ff:ff:ff"
-DRIVER = "mt7921u"
 
 # Deauthentication is management subtype 12; disassociation is subtype 10. Both
 # are used for deauth-style denial of service, so we count and report both but
@@ -63,18 +62,91 @@ else:
 # Interface / radio plumbing (mirrors init-hunt.sh and deauth_hunt.py)
 # ==========================================================================
 
-def detect_iface():
-    """Find the interface bound to the mt7921u driver, as deauth_hunt.py does."""
+def _wifi_ifaces():
+    """Every wireless interface (those with an 802.11 phy), name-sorted."""
     base = "/sys/class/net"
     try:
         names = os.listdir(base)
     except OSError:
-        return None
-    for name in sorted(names):
-        link = os.path.join(base, name, "device", "driver")
-        if os.path.exists(link) and os.path.basename(os.path.realpath(link)) == DRIVER:
-            return name
+        return []
+    return [n for n in sorted(names)
+            if os.path.exists(os.path.join(base, n, "phy80211"))]
+
+
+def iface_driver(iface):
+    """Kernel driver bound to the interface, or None."""
+    link = f"/sys/class/net/{iface}/device/driver"
+    try:
+        if os.path.exists(link):
+            return os.path.basename(os.path.realpath(link))
+    except OSError:
+        pass
     return None
+
+
+def iface_is_usb(iface):
+    """True if the interface is a USB device (a plug-in adapter)."""
+    try:
+        return "/usb" in os.path.realpath(f"/sys/class/net/{iface}/device")
+    except OSError:
+        return False
+
+
+def iface_connected(iface):
+    """True if the interface is currently associated with an AP.
+
+    A card carrying a live Wi-Fi link is the operator's normal connection, not
+    the spare we want to commandeer for monitor mode.
+    """
+    try:
+        out = subprocess.run(["iw", "dev", iface, "link"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return False
+    return "Connected to" in out
+
+
+def detect_iface():
+    """Pick the interface to hunt with, chip-agnostically.
+
+    Order of preference:
+      1. $HUNT_IFACE, if it names an existing interface.
+      2. An interface bound to $HUNT_DRIVER, if that env var is set (lets you
+         pin a specific adapter by driver, e.g. the old mt7921u default).
+      3. A wireless interface not currently associated to an AP - i.e. the
+         spare adapter dedicated to the hunt rather than the one carrying the
+         operator's Wi-Fi. Among candidates, one already in monitor mode wins,
+         then a USB adapter, then name order.
+
+    Only falls back to a connected interface if it is the sole radio present.
+    """
+    forced = os.environ.get("HUNT_IFACE")
+    if forced and os.path.exists(f"/sys/class/net/{forced}"):
+        return forced
+
+    ifaces = _wifi_ifaces()
+    if not ifaces:
+        return None
+
+    drv = os.environ.get("HUNT_DRIVER")
+    if drv:
+        # An explicit pin is strict: match it or fail, never a different card.
+        for name in ifaces:
+            if iface_driver(name) == drv:
+                return name
+        return None
+
+    free = [n for n in ifaces if not iface_connected(n)]
+    pool = free or ifaces
+
+    def rank(n):
+        return (
+            0 if iface_mode(n) == "monitor" else 1,
+            0 if iface_is_usb(n) else 1,
+            n,
+        )
+
+    return sorted(pool, key=rank)[0]
 
 
 def iface_phy(iface):
@@ -251,7 +323,8 @@ def main():
     p = argparse.ArgumentParser(
         description="Sweep 2.4/5 GHz channels and report where deauth attacks are.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--iface", help="monitor-mode interface (auto-detects mt7921u)")
+    p.add_argument("--iface", help="monitor-mode interface (default: the spare "
+                                    "Wi-Fi card not carrying your connection)")
     p.add_argument("--dwell", type=float, default=3.0,
                    help="seconds to listen on each channel")
     p.add_argument("--rate", type=float, default=2.0,
@@ -270,8 +343,8 @@ def main():
 
     iface = args.iface or detect_iface()
     if not iface:
-        sys.exit("No mt7921u interface found. Plug the adapter in and run "
-                 "'sudo ./init-hunt.sh' first, or pass --iface.")
+        sys.exit("No spare wireless interface found. Plug the adapter in and run "
+                 "'sudo ./init-hunt.sh' first, or pass --iface (or set $HUNT_IFACE).")
     if not os.path.exists(f"/sys/class/net/{iface}"):
         sys.exit(f"interface '{iface}' does not exist")
 

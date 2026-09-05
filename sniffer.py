@@ -276,6 +276,10 @@ class Aggregator:
                     "pwn": False, "count": 0, "has_ht": False,
                     "has_vht": False, "has_he": False, "streams": 1,
                     "wps_name": "", "wps_model": "", "wps_manuf": "",
+                    # Seed the "strongest member" fields so they always exist,
+                    # even when every member sits at the -99 rssi floor (no
+                    # signal parsed) and the update test below never fires.
+                    "primary_ssid": n["ssid"], "strong_bssid": n["bssid"],
                     "_best": -99}
             g["bssids"].add(n["bssid"])
             if n["ssid"]:
@@ -798,7 +802,8 @@ def main():
     p = argparse.ArgumentParser(
         description="All-in-one WiFi DF: pick a network, a deauth flood, or a MAC, then hunt it.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--iface", help="monitor-mode interface (auto-detects mt7921u)")
+    p.add_argument("--iface", help="monitor-mode interface (default: the spare "
+                                    "Wi-Fi card not carrying your connection)")
     p.add_argument("--band", choices=["2.4", "5", "both"], default="both",
                    help="bands to hop while scanning")
     p.add_argument("--dwell", type=float, default=1.2,
@@ -844,7 +849,8 @@ def main():
 
     iface = args.iface or detect_iface()
     if not iface:
-        sys.exit("No mt7921u interface found. Run 'sudo ./init-hunt.sh' or pass --iface.")
+        sys.exit("No spare wireless interface found. Run 'sudo ./init-hunt.sh', "
+                 "pass --iface, or set $HUNT_IFACE.")
     if not os.path.exists(f"/sys/class/net/{iface}"):
         sys.exit(f"interface '{iface}' does not exist")
     mode = iface_mode(iface)
